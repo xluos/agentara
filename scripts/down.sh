@@ -8,15 +8,20 @@ GRACEFUL_WAIT_TICKS=10  # 10 × 0.5s = 5 seconds
 EXIT_CODE=0
 
 # Expected command patterns per process name
-declare -A EXPECTED_CMD
-EXPECTED_CMD[server]="bun run dev:server"
-EXPECTED_CMD[web]="bun run dev:web"
+expected_cmd_for() {
+  case "$1" in
+    server) echo "bun run start:server" ;;
+    web)    echo "bun run dev:web" ;;
+    *)      echo "" ;;
+  esac
+}
 
 # Verify PID belongs to the expected process
 is_our_process() {
   local pid="$1"
   local name="$2"
-  local expected="${EXPECTED_CMD[$name]:-}"
+  local expected
+  expected="$(expected_cmd_for "$name")"
 
   if [ -z "$expected" ]; then
     return 0  # no pattern to match, assume ours

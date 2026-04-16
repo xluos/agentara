@@ -11,8 +11,9 @@
     "check:types": "tsc --noEmit",
     "clean:data": "rm -rf user-home/data && rm -rf user-home/sessions",
     "dev": "concurrently \"bun run dev:server\" \"bun run dev:web\"",
-    "dev:server": "bun run index.ts",
+    "dev:server": "bun --watch run index.ts",
     "dev:web": "cd web && bun run dev",
+    "start:server": "bun run index.ts",
     "lint": "eslint . --ext .ts",
     "lint:fix": "eslint . --ext .ts --fix",
     "prepare": "husky"
