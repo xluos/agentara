@@ -211,6 +211,7 @@ export const helpHandler: CommandHandler = {
       ...BUILTIN_COMMANDS.map((h) => `- ${h.description}`),
       "- /help — 显示本消息",
       "- /stop — 取消当前 session 正在执行的任务",
+      "- /init — 打开交互卡片，从预定义仓库目录中批量克隆并绑定",
     ].join("\n");
   },
 };

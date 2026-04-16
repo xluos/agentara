@@ -50,6 +50,8 @@ export const UserMessage = BaseMessage.extend({
   chat_id: z.string().optional(),
   /** Feishu topic/thread id, when the message is inside a topic. */
   thread_id: z.string().optional(),
+  /** Provider-specific open_id of the sender (e.g. Feishu open_id). */
+  sender_open_id: z.string().optional(),
   content: z.array(
     z.discriminatedUnion("type", [
       TextMessageContent,

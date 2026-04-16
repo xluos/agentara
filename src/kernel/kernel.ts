@@ -1,7 +1,7 @@
 import { FeishuMessageChannel } from "@/community/feishu";
 import * as feishuMessagingSchema from "@/community/feishu/messaging/data";
 import { DataConnection } from "@/data";
-import type { AssistantMessage, UserMessage } from "@/shared";
+import type { AssistantMessage, CardActionPayload, UserMessage } from "@/shared";
 import {
   config,
   createLogger,
@@ -14,6 +14,7 @@ import {
 import { HonoServer } from "../server";
 
 import { CommandRegistry, parseCommand } from "./commands";
+import { InitFlow } from "./init/init-flow";
 import { MultiChannelMessageGateway } from "./messaging";
 import { SessionManager } from "./sessioning";
 import * as sessioningSchema from "./sessioning/data";
@@ -34,6 +35,8 @@ class Kernel {
   private _honoServer!: HonoServer;
   private _workspaceStore!: GroupWorkspaceStore;
   private _commandRegistry!: CommandRegistry;
+  private _feishuChannels = new Map<string, FeishuMessageChannel>();
+  private _initFlow!: InitFlow;
 
   constructor() {
     this._initDatabase();
@@ -42,6 +45,7 @@ class Kernel {
     this._initCommandRegistry();
     this._initTaskDispatcher();
     this._initMessageGateway();
+    this._initInitFlow();
     this._initServer();
   }
 
@@ -109,25 +113,33 @@ class Kernel {
       const allowedEmails = splitCsv(channel.params.allowed_user_emails);
       const requireMention =
         (channel.params.require_mention ?? "").toLowerCase() === "true";
-      this._messageGateway.registerChannel(
-        new FeishuMessageChannel(
-          channel.id,
-          {
-            chatId: channel.params.chat_id!,
-            appId: channel.params.app_id!,
-            appSecret: channel.params.app_secret!,
-            requireMention,
-            allowedUserOpenIds:
-              allowedOpenIds.length > 0 ? allowedOpenIds : undefined,
-            allowedUserEmails:
-              allowedEmails.length > 0 ? allowedEmails : undefined,
-          },
-          this._database.db,
-        ),
+      const feishuChannel = new FeishuMessageChannel(
+        channel.id,
+        {
+          chatId: channel.params.chat_id!,
+          appId: channel.params.app_id!,
+          appSecret: channel.params.app_secret!,
+          requireMention,
+          allowedUserOpenIds:
+            allowedOpenIds.length > 0 ? allowedOpenIds : undefined,
+          allowedUserEmails:
+            allowedEmails.length > 0 ? allowedEmails : undefined,
+        },
+        this._database.db,
       );
+      this._feishuChannels.set(channel.id, feishuChannel);
+      this._messageGateway.registerChannel(feishuChannel);
     }
     this._messageGateway.on("message:inbound", this._handleInboundMessage);
     this._messageGateway.on("message:recalled", this._handleMessageRecall);
+    this._messageGateway.on("card:action", this._handleCardAction);
+  }
+
+  private _initInitFlow(): void {
+    this._initFlow = new InitFlow({
+      workspaceStore: this._workspaceStore,
+      feishuChannels: this._feishuChannels,
+    });
   }
 
   /**
@@ -150,6 +162,13 @@ class Kernel {
     // Handle /stop command (kernel-owned because it talks to TaskDispatcher)
     if (text === "/stop") {
       await this._handleStopCommand(message);
+      return;
+    }
+
+    // Handle /init command (kernel-owned — renders an interactive card and
+    // awaits a card:action callback rather than returning a plain text reply).
+    if (text === "/init") {
+      await this._initFlow.start(message);
       return;
     }
 
@@ -243,6 +262,21 @@ class Kernel {
         "task stopped due to message recall",
       );
     }
+  };
+
+  /**
+   * Route card-action callbacks by the `action_name` discriminator. Right now
+   * only `/init` produces callbacks; unknown actions are logged and dropped.
+   */
+  private _handleCardAction = async (payload: CardActionPayload) => {
+    if (payload.action_name === "init_submit") {
+      await this._initFlow.handleSubmit(payload);
+      return;
+    }
+    this._logger.warn(
+      { action_name: payload.action_name, message_id: payload.message_id },
+      "unhandled card action",
+    );
   };
 
   private _handleInboundMessageTask = async (

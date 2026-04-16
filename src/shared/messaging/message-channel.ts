@@ -2,12 +2,43 @@ import type EventEmitter from "eventemitter3";
 
 import type { AssistantMessage, UserMessage } from "./types";
 
+/**
+ * Payload delivered when a user interacts with an interactive card. The
+ * channel normalizes the provider-specific event (for Feishu:
+ * `card.action.trigger`) into this shape before re-emitting.
+ */
+export interface CardActionPayload {
+  /** ID of the card message the user interacted with. */
+  message_id: string;
+  /** Channel that delivered the event. */
+  channel_id: string;
+  /** Provider-specific chat/group identifier, if applicable. */
+  chat_id?: string;
+  /** open_id of the user who clicked. */
+  operator_open_id: string;
+  /**
+   * Action discriminator. For our own cards, this is set via
+   * `behaviors[].value.action` on the triggering element. Commands use it to
+   * route the event (e.g. `"init_submit"`).
+   */
+  action_name: string;
+  /** The full `behaviors[].value` dict, passed through verbatim. */
+  value: Record<string, unknown>;
+  /**
+   * For `action_type: "form_submit"` — values of every named field inside the
+   * enclosing form (input/checker/select). Empty for non-form actions.
+   */
+  form_value: Record<string, unknown>;
+}
+
 /** Event types emitted by a message channel. */
 export interface MessageChannelEventTypes {
   // eslint-disable-next-line no-unused-vars
   "message:inbound": (message: UserMessage) => void;
   // eslint-disable-next-line no-unused-vars
   "message:recalled": (messageId: string, channelId: string) => void;
+  // eslint-disable-next-line no-unused-vars
+  "card:action": (payload: CardActionPayload) => void;
 }
 
 /** Abstract message channel for sending and receiving messages. */

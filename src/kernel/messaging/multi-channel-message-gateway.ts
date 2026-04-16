@@ -4,6 +4,7 @@ import EventEmitter from "eventemitter3";
 import type { DrizzleDB } from "@/data";
 import type {
   AssistantMessage,
+  CardActionPayload,
   MessageChannel,
   MessageGateway,
   MessageGatewayEventTypes,
@@ -46,6 +47,9 @@ export class MultiChannelMessageGateway
     });
     channel.on("message:recalled", (messageId: string, channelId: string) => {
       this.emit("message:recalled", messageId, channelId);
+    });
+    channel.on("card:action", (payload: CardActionPayload) => {
+      this.emit("card:action", payload);
     });
     this._logger.info(`Registered channel: ${channel.id}`);
   }

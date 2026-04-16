@@ -13,6 +13,7 @@ export type {
   ChannelConfig,
   ChannelParams,
   MessagingConfig,
+  PredefinedRepo,
   TaskingConfig,
 } from "./schema";
 
@@ -87,6 +88,12 @@ export const config = {
       );
     }
     return _appConfig.messaging;
+  },
+  get predefined_repos() {
+    if (!_appConfig) {
+      return [];
+    }
+    return _appConfig.predefined_repos;
   },
   paths,
 };

@@ -1,6 +1,6 @@
 import type EventEmitter from "eventemitter3";
 
-import type { MessageChannel } from "./message-channel";
+import type { CardActionPayload, MessageChannel } from "./message-channel";
 import type { AssistantMessage, UserMessage } from "./types";
 
 /** Event types emitted by a message gateway. */
@@ -9,6 +9,8 @@ export interface MessageGatewayEventTypes {
   "message:inbound": (message: UserMessage) => void;
   // eslint-disable-next-line no-unused-vars
   "message:recalled": (messageId: string, channelId: string) => void;
+  // eslint-disable-next-line no-unused-vars
+  "card:action": (payload: CardActionPayload) => void;
 }
 
 /**

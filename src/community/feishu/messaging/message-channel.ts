@@ -12,14 +12,16 @@ import {
   createLogger,
   uuid,
   type AssistantMessage,
+  type CardActionPayload,
   type MessageChannel,
   type MessageChannelEventTypes,
   type UserMessage,
 } from "@/shared";
 
+
 import { feishuThreads } from "./data";
 import { renderMessageCard, splitMarkdownByTables } from "./message-renderer";
-import type { MessageReceiveEventData } from "./types";
+import type { Card, MessageReceiveEventData } from "./types";
 import { convertPostToMarkdown } from "./utils";
 
 function _isFeishuBadRequestError(err: unknown): boolean {
@@ -153,11 +155,69 @@ export class FeishuMessageChannel
       }
     }
 
+    // The node-sdk's `IHandles` type doesn't include card-action events, but
+    // the underlying `EventDispatcher.invoke` dispatches by event-type string,
+    // and the WS gateway delivers `card.action.trigger` alongside regular
+    // events for self-built Feishu apps. We cast through `as never` to bypass
+    // the typing gap without loosening the strict lookup of typed handlers.
     await this._inboundClient.start({
       eventDispatcher: new EventDispatcher({}).register({
         "im.message.receive_v1": this._handleMessageReceive,
         "im.message.recalled_v1": this._handleMessageRecall,
+        ["card.action.trigger" as never]: this
+          ._handleCardAction as never,
       }),
+    });
+  }
+
+  /**
+   * Send a raw Feishu interactive card to a chat. Escape hatch used by
+   * commands that render custom cards (e.g. `/init`) outside the normal
+   * AssistantMessage pipeline. Returns the posted message's id so the caller
+   * can correlate later card actions / updates.
+   */
+  async sendRawCard(
+    chatId: string,
+    card: Card,
+    options: { replyTo?: string } = {},
+  ): Promise<string> {
+    if (options.replyTo) {
+      const { data } = await this._client.im.message.reply({
+        path: { message_id: options.replyTo },
+        data: {
+          msg_type: "interactive",
+          content: JSON.stringify(card),
+          reply_in_thread: true,
+        },
+      });
+      if (!data?.message_id) {
+        throw new Error("Failed to reply with interactive card");
+      }
+      return data.message_id;
+    }
+    const { data } = await this._client.im.message.create({
+      params: { receive_id_type: "chat_id" },
+      data: {
+        receive_id: chatId,
+        msg_type: "interactive",
+        content: JSON.stringify(card),
+      },
+    });
+    if (!data?.message_id) {
+      throw new Error("Failed to post interactive card");
+    }
+    return data.message_id;
+  }
+
+  /**
+   * Replace the content of an existing interactive card message. Used by
+   * card-driven flows to transition the same message from "pending" to
+   * "completed" without spawning a new reply.
+   */
+  async updateRawCard(messageId: string, card: Card): Promise<void> {
+    await this._client.im.message.patch({
+      path: { message_id: messageId },
+      data: { content: JSON.stringify(card) },
     });
   }
 
@@ -760,6 +820,7 @@ export class FeishuMessageChannel
       channel_id: this.id,
       chat_id: chatId,
       thread_id: threadId,
+      sender_open_id: senderOpenId,
       content: [
         await this._parseMessageContent(
           messageId,
@@ -780,6 +841,71 @@ export class FeishuMessageChannel
     if (!data.message_id) return;
     this._logger.info({ message_id: data.message_id }, "message recalled");
     this.emit("message:recalled", data.message_id, this.id);
+  };
+
+  /**
+   * Handle a `card.action.trigger` event delivered via the WS event stream.
+   * Normalizes the provider-specific shape into `CardActionPayload` and emits
+   * `card:action`; the kernel dispatches by `action_name`.
+   */
+  private _handleCardAction = async (data: {
+    operator?: { open_id?: string; tenant_key?: string };
+    action?: {
+      value?: Record<string, unknown>;
+      form_value?: Record<string, unknown>;
+      tag?: string;
+      name?: string;
+    };
+    context?: { open_message_id?: string; open_chat_id?: string };
+  }) => {
+    const messageId = data.context?.open_message_id;
+    const operatorOpenId = data.operator?.open_id;
+    if (!messageId || !operatorOpenId) {
+      this._logger.warn(
+        { data },
+        "ignoring card.action.trigger with missing message_id/operator",
+      );
+      return;
+    }
+    const value = data.action?.value ?? {};
+    // `action.value.action` is set for callback buttons (`behaviors[].value`).
+    // For form_submit buttons we don't attach behaviors, so fall back to the
+    // submit button's `name`, which Feishu echoes at `action.name`. That makes
+    // the submit-button name the de-facto action discriminator for forms.
+    const actionName =
+      typeof value.action === "string"
+        ? value.action
+        : typeof data.action?.name === "string"
+          ? data.action.name
+          : "";
+    const payload: CardActionPayload = {
+      message_id: messageId,
+      channel_id: this.id,
+      chat_id: data.context?.open_chat_id,
+      operator_open_id: operatorOpenId,
+      action_name: actionName,
+      value,
+      form_value: data.action?.form_value ?? {},
+    };
+    this._logger.info(
+      {
+        message_id: messageId,
+        action_name: actionName,
+        operator_open_id: operatorOpenId,
+        form_value: data.action?.form_value,
+        raw_value: value,
+      },
+      "card action",
+    );
+    this.emit("card:action", payload);
+    // Acknowledge the action back to Feishu via the WS response (the SDK
+    // base64-encodes this as respPayload.data). Without an ack, the card UI
+    // can surface a generic failure toast while the real work happens
+    // asynchronously. Handlers downstream update the card in-place via
+    // `updateRawCard` when done.
+    return {
+      toast: { type: "info", content: "已收到，正在处理…" },
+    };
   };
 
   private _threadIdToSessionId = new Map<string, string>();

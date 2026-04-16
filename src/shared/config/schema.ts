@@ -70,6 +70,19 @@ export const MessagingConfig = z.object({
 export interface MessagingConfig extends z.infer<typeof MessagingConfig> {}
 
 /**
+ * A pre-defined repository surfaced by the `/init` command. Operators curate
+ * this catalog in `config.yaml`; `/init` renders it as a Feishu interactive
+ * card for the user to pick which repos (and branches) to clone into the
+ * group's workspace.
+ */
+export const PredefinedRepo = z.object({
+  name: z.string(),
+  description: z.string().default(""),
+  git_url: z.string(),
+});
+export interface PredefinedRepo extends z.infer<typeof PredefinedRepo> {}
+
+/**
  * Top-level application configuration loaded from config.yaml.
  */
 export const AppConfig = z.object({
@@ -80,5 +93,7 @@ export const AppConfig = z.object({
   agents: AgentsConfig,
   tasking: TaskingConfig,
   messaging: MessagingConfig,
+  /** Optional catalog for `/init`. Empty/unset means the command is disabled. */
+  predefined_repos: z.array(PredefinedRepo).default([]),
 });
 export interface AppConfig extends z.infer<typeof AppConfig> {}
