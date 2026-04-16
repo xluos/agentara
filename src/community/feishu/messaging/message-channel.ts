@@ -172,7 +172,7 @@ export class FeishuMessageChannel
 
   /**
    * Send a raw Feishu interactive card to a chat. Escape hatch used by
-   * commands that render custom cards (e.g. `/init`) outside the normal
+   * commands that render custom cards (e.g. `/setup`) outside the normal
    * AssistantMessage pipeline. Returns the posted message's id so the caller
    * can correlate later card actions / updates.
    *

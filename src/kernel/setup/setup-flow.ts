@@ -5,6 +5,7 @@ import type { Logger } from "@/shared";
 import {
   config,
   createLogger,
+  loadPredefinedRepos,
   type CardActionPayload,
   type PredefinedRepo,
   type UserMessage,
@@ -13,14 +14,18 @@ import {
 import type { FeishuMessageChannel } from "../../community/feishu/messaging/message-channel";
 import type { GroupWorkspaceStore } from "../workspaces";
 
-import { buildInitCard, buildInitResultCard, INIT_FIELD } from "./init-card";
+import {
+  buildSetupCard,
+  buildSetupResultCard,
+  SETUP_FIELD,
+} from "./setup-card";
 
 /**
- * In-memory pending state for a `/init` card that has been sent but not yet
- * submitted. Dropped on kernel restart — expired cards surface a clear error
- * back to the user instead of being silently honored.
+ * In-memory pending state for a `/setup` card that has been sent but not
+ * yet submitted. Dropped on kernel restart — expired cards surface a clear
+ * error back to the user instead of being silently honored.
  */
-interface PendingInit {
+interface PendingSetup {
   chat_id: string;
   initiator_open_id: string;
   catalog_snapshot: PredefinedRepo[];
@@ -42,25 +47,25 @@ interface RepoResult {
 }
 
 /**
- * Stateful orchestrator for the `/init` interactive flow.
+ * Stateful orchestrator for the `/setup` interactive flow.
  *
  * Lifecycle per invocation:
- * 1. `start(message)` renders the card and remembers the catalog snapshot
- *    keyed by the outbound message id.
- * 2. The kernel routes a `card:action` with `action_name === "init_submit"`
+ * 1. `start(message)` loads the catalog from `REPOS.md`, renders the card,
+ *    and remembers the catalog snapshot keyed by the outbound message id.
+ * 2. The kernel routes a `card:action` with `action_name === "setup_submit"`
  *    to `handleSubmit(payload)`.
  * 3. The handler clones the selected repos, checks out the requested branches,
  *    upserts the group binding, and replaces the original card with a result
  *    card via `updateRawCard`.
  *
  * Single-writer: all pending-state access stays on this instance. One pending
- * init per chat is implicit — issuing `/init` again replaces the key.
+ * setup per chat is implicit — issuing `/setup` again replaces the key.
  */
-export class InitFlow {
-  private readonly _logger: Logger = createLogger("init-flow");
+export class SetupFlow {
+  private readonly _logger: Logger = createLogger("setup-flow");
   private readonly _workspaceStore: GroupWorkspaceStore;
   private readonly _feishuChannels: Map<string, FeishuMessageChannel>;
-  private readonly _pending = new Map<string, PendingInit>();
+  private readonly _pending = new Map<string, PendingSetup>();
 
   constructor(deps: {
     workspaceStore: GroupWorkspaceStore;
@@ -72,20 +77,20 @@ export class InitFlow {
 
   /**
    * Entry point invoked from `kernel._handleInboundMessage` when the inbound
-   * text is `/init`. Sends back either a plain-text error (no catalog, already
-   * bound, ...) or the interactive card.
+   * text is `/setup`. Sends back either a plain-text error (no catalog,
+   * already bound, ...) or the interactive card.
    */
   async start(message: UserMessage): Promise<void> {
     const chatId = message.chat_id;
     if (!chatId || !message.channel_id) {
-      await this._replyText(message, "❌ /init 仅在飞书群内可用。");
+      await this._replyText(message, "❌ /setup 仅在飞书群内可用。");
       return;
     }
-    const catalog = config.predefined_repos;
+    const catalog = loadPredefinedRepos();
     if (catalog.length === 0) {
       await this._replyText(
         message,
-        "❌ 未配置 `predefined_repos`，请先在 `config.yaml` 里加上仓库目录。",
+        "❌ 仓库目录为空，请在 `$AGENTARA_HOME/REPOS.md` 里添加仓库条目（参考文件顶部的示例）。",
       );
       return;
     }
@@ -105,7 +110,7 @@ export class InitFlow {
       return;
     }
 
-    const card = buildInitCard(catalog);
+    const card = buildSetupCard(catalog);
     const cardMessageId = await channel.sendRawCard(chatId, card, {
       replyTo: message.id,
     });
@@ -117,15 +122,15 @@ export class InitFlow {
     });
     this._logger.info(
       { chat_id: chatId, card_message_id: cardMessageId },
-      "init card sent",
+      "setup card sent",
     );
   }
 
   /**
    * Entry point invoked from the kernel's `card:action` listener when the
-   * payload's `action_name === "init_submit"`. Looks up the pending state by
-   * `payload.message_id` and either rejects the submission (expired, wrong
-   * user, invalid selection) or runs the clone+bind sequence.
+   * payload's `action_name === "setup_submit"`. Looks up the pending state
+   * by `payload.message_id` and either rejects the submission (expired,
+   * wrong user, invalid selection) or runs the clone+bind sequence.
    */
   async handleSubmit(payload: CardActionPayload): Promise<void> {
     const channel = this._feishuChannels.get(payload.channel_id);
@@ -141,8 +146,8 @@ export class InitFlow {
       await this._tryUpdateCard(
         channel,
         payload.message_id,
-        buildInitResultCard(
-          "⚠️  这张卡片已失效，请重新发送 `/init`。",
+        buildSetupResultCard(
+          "⚠️  这张卡片已失效，请重新发送 `/setup`。",
           [],
         ),
         "expired",
@@ -156,7 +161,7 @@ export class InitFlow {
       await this._tryUpdateCard(
         channel,
         payload.message_id,
-        buildInitResultCard("🚫 这不是你的表单。", []),
+        buildSetupResultCard("🚫 这不是你的表单。", []),
         "non-initiator",
       );
       return;
@@ -172,15 +177,15 @@ export class InitFlow {
       await this._tryUpdateCard(
         channel,
         payload.message_id,
-        buildInitResultCard("⚠️  未选择任何仓库，请重新发送 `/init`。", []),
+        buildSetupResultCard("⚠️  未选择任何仓库，请重新发送 `/setup`。", []),
         "empty-selection",
       );
       return;
     }
 
     const rawPrimary =
-      typeof payload.form_value[INIT_FIELD.primaryRepo] === "string"
-        ? (payload.form_value[INIT_FIELD.primaryRepo] as string)
+      typeof payload.form_value[SETUP_FIELD.primaryRepo] === "string"
+        ? (payload.form_value[SETUP_FIELD.primaryRepo] as string)
         : "";
     // `selections` is guaranteed non-empty by the earlier length-check return.
     const firstSel = selections[0]!;
@@ -194,7 +199,7 @@ export class InitFlow {
     await this._tryUpdateCard(
       channel,
       payload.message_id,
-      buildInitResultCard(
+      buildSetupResultCard(
         `⏳ 正在初始化 \`${selections.map((s) => s.name).join("、")}\`…`,
         selections.map(
           (s) => `- \`${s.name}\` @ \`${s.branch}\``,
@@ -236,7 +241,7 @@ export class InitFlow {
     await this._tryUpdateCard(
       channel,
       payload.message_id,
-      buildInitResultCard(summary, lines),
+      buildSetupResultCard(summary, lines),
       "final-result",
     );
     this._logger.info(
@@ -245,7 +250,7 @@ export class InitFlow {
         primary,
         results: results.map((r) => ({ name: r.name, status: r.status })),
       },
-      "init submit completed",
+      "setup submit completed",
     );
   }
 
@@ -257,7 +262,7 @@ export class InitFlow {
   private async _tryUpdateCard(
     channel: FeishuMessageChannel,
     messageId: string,
-    card: ReturnType<typeof buildInitResultCard>,
+    card: ReturnType<typeof buildSetupResultCard>,
     stage: string,
   ): Promise<void> {
     try {
@@ -278,9 +283,9 @@ export class InitFlow {
     const out: Array<{ repo: PredefinedRepo; name: string; branch: string }> =
       [];
     for (const repo of catalog) {
-      const rawChecked = formValue[INIT_FIELD.repoChecker(repo.name)];
+      const rawChecked = formValue[SETUP_FIELD.repoChecker(repo.name)];
       if (!_isTruthyChecker(rawChecked)) continue;
-      const rawBranch = formValue[INIT_FIELD.branchInput(repo.name)];
+      const rawBranch = formValue[SETUP_FIELD.branchInput(repo.name)];
       const branch =
         typeof rawBranch === "string" && rawBranch.trim()
           ? rawBranch.trim()

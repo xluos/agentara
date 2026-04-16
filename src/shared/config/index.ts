@@ -14,9 +14,10 @@ export type {
   ChannelParams,
   CodexConfig,
   MessagingConfig,
-  PredefinedRepo,
   TaskingConfig,
 } from "./schema";
+
+export { loadPredefinedRepos, PredefinedRepo } from "./predefined-repos";
 
 /**
  * Combined configuration interface including both YAML-loaded app config and paths.
@@ -89,12 +90,6 @@ export const config = {
       );
     }
     return _appConfig.messaging;
-  },
-  get predefined_repos() {
-    if (!_appConfig) {
-      return [];
-    }
-    return _appConfig.predefined_repos;
   },
   paths,
 };

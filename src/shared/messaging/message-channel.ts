@@ -19,7 +19,7 @@ export interface CardActionPayload {
   /**
    * Action discriminator. For our own cards, this is set via
    * `behaviors[].value.action` on the triggering element. Commands use it to
-   * route the event (e.g. `"init_submit"`).
+   * route the event (e.g. `"setup_submit"`).
    */
   action_name: string;
   /** The full `behaviors[].value` dict, passed through verbatim. */

@@ -77,8 +77,8 @@ export interface CollapsiblePanel extends BaseContainer<"collapsible_panel"> {
 }
 
 /**
- * Generic callback value on an interactive element. Our `/init` flow uses
- * `{ action: string; init_id: string; ... }`, but we keep the shape open so
+ * Generic callback value on an interactive element. Our `/setup` flow uses
+ * `{ action: string; setup_id: string; ... }`, but we keep the shape open so
  * future interactive commands can attach whatever discriminator they need.
  * The server receives this verbatim on `card.action.trigger`.
  */

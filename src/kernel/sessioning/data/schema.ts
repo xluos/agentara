@@ -33,7 +33,7 @@ export const sessions = sqliteTable("sessions", {
 
 /**
  * Persisted group↔workspace bindings. One row per Feishu group that has been
- * bound via `/bind` or `/init`. Absence of a row means the group is unbound
+ * bound via `/bind` or `/setup`. Absence of a row means the group is unbound
  * and falls back to the default workspace.
  *
  * workspace_path is always `$AGENTARA_HOME/workspaces/<chat_id>/`; stored to

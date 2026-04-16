@@ -11,6 +11,8 @@ export function resolveSessionFilePath(session_id: string) {
   return join(sessions, `${session_id}.jsonl`);
 }
 
+export const repos_md = join(home, "REPOS.md");
+
 export const memory = join(home, "memory");
 export const logs = join(memory, "logs");
 export function resolveDailyLogFilePath(date: Date) {

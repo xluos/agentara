@@ -15,7 +15,7 @@ Enable one agentara bot to serve multiple Feishu groups. Each group binds to its
 
 - Per-topic workspace override (binding lives at group level only)
 - Multiple simultaneously-active repos inside one workspace
-- Rich card UI for `/init` in v1 (text commands first, card in v2)
+- Rich card UI for `/setup` in v1 (text commands first, card in v2)
 
 ## Data Model
 
@@ -76,7 +76,7 @@ Parsed in `Kernel._handleInboundMessage` (`src/kernel/kernel.ts:114`) before `Ta
 
 | Command | Scope | Effect |
 |---------|-------|--------|
-| `/init` | group | Reply with an interactive card. User picks repo + branch; card submit writes group binding. v1 may fall back to `/bind`. |
+| `/setup` | group | Reply with an interactive card. User picks repo + branch; card submit writes group binding. v1 may fall back to `/bind`. |
 | `/bind <repo> <branch>` | group | Upsert `group_workspaces` row, set `active_repo` + `active_branch`. Rejects if `<repo>` not in workspace (suggests `/clone`). |
 | `/unbind` | group | Delete `group_workspaces` row. |
 | `/status` | group + topic | Show group binding, list cloned repos, show current topic's `session_id`. |
@@ -88,7 +88,7 @@ Parsed in `Kernel._handleInboundMessage` (`src/kernel/kernel.ts:114`) before `Ta
 
 Already-implemented reference: `/stop` (`src/kernel/kernel.ts:118`). Extend the same if-chain into a command table.
 
-Card interaction for `/init` should mirror the streaming card pattern in `remote_claude/lark_client/shared_memory_poller.py` + interactive element handling in Feishu card-action callbacks. Deferred to v2.
+Card interaction for `/setup` should mirror the streaming card pattern in `remote_claude/lark_client/shared_memory_poller.py` + interactive element handling in Feishu card-action callbacks. Deferred to v2.
 
 ## Resolution Flow
 
@@ -202,7 +202,7 @@ No breaking change for users with existing single-chat config — a missing `cha
 6. Slash command parser + core handlers (`/bind`, `/unbind`, `/status`, `/clone`, `/checkout`, `/ls`)
 7. `/new`, `/agent` — session lifecycle commands
 8. Default workspace bootstrap
-9. v2: `/init` Feishu card interaction
+9. v2: `/setup` Feishu card interaction
 
 ## Open Questions
 

@@ -3,7 +3,7 @@ import { z } from "zod";
 /**
  * A persisted per-group workspace binding.
  *
- * Each Feishu group that has been bound via `/bind` or `/init` owns one row.
+ * Each Feishu group that has been bound via `/bind` or `/setup` owns one row.
  * The workspace directory is always `$AGENTARA_HOME/workspaces/<chat_id>/`
  * and may host multiple cloned repos as first-level subdirectories. The
  * active `(repo, branch)` pointer is what `_handleInboundMessageTask` reads

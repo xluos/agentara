@@ -16,27 +16,27 @@ import type {
  * Field naming convention used by both the card renderer and the submit
  * handler. Keep them in one place so the two sides cannot drift apart.
  */
-export const INIT_FIELD = {
+export const SETUP_FIELD = {
   repoChecker: (name: string) => `repo_${name}`,
   branchInput: (name: string) => `branch_${name}`,
   primaryRepo: "primary_repo",
 } as const;
 
 /**
- * Build the interactive `/init` card.
+ * Build the interactive `/setup` card.
  *
  * Layout:
  * - Header: prompt text
  * - Form body: one row per predefined repo (checker + branch input + description)
  * - Primary-repo selector (always shown; default = first repo in catalog)
  * - Submit button ("初始化") with `action_type: "form_submit"`. On submit the
- *   server receives `action.name = "init_submit"` and `action.form_value`
+ *   server receives `action.name = "setup_submit"` and `action.form_value`
  *   carries the checker + input + select values.
  *
  * Card-to-pending correlation happens on the kernel side via `message_id`,
- * so the card itself carries no init_id.
+ * so the card itself carries no setup_id.
  */
-export function buildInitCard(catalog: PredefinedRepo[]): Card {
+export function buildSetupCard(catalog: PredefinedRepo[]): Card {
   const formElements: Element[] = [];
 
   for (const repo of catalog) {
@@ -48,7 +48,7 @@ export function buildInitCard(catalog: PredefinedRepo[]): Card {
 
   const form: FormElement = {
     tag: "form",
-    name: "init_form",
+    name: "setup_form",
     elements: formElements,
   };
 
@@ -85,13 +85,13 @@ function _buildRepoRow(repo: PredefinedRepo): ColumnSetElement {
     : repo.name;
   const checker: CheckerElement = {
     tag: "checker",
-    name: INIT_FIELD.repoChecker(repo.name),
+    name: SETUP_FIELD.repoChecker(repo.name),
     text: { tag: "plain_text", content: label },
     checked: false,
   };
   const branchInput: InputElement = {
     tag: "input",
-    name: INIT_FIELD.branchInput(repo.name),
+    name: SETUP_FIELD.branchInput(repo.name),
     placeholder: { tag: "plain_text", content: "master" },
     width: "fill",
   };
@@ -110,7 +110,7 @@ function _buildRepoRow(repo: PredefinedRepo): ColumnSetElement {
 function _buildPrimarySelect(catalog: PredefinedRepo[]): SelectStaticElement {
   return {
     tag: "select_static",
-    name: INIT_FIELD.primaryRepo,
+    name: SETUP_FIELD.primaryRepo,
     placeholder: { tag: "plain_text", content: "选择主仓库（默认第一个）" },
     initial_option: catalog[0]?.name,
     options: catalog.map((r) => ({
@@ -128,12 +128,12 @@ function _buildSubmitButton(): ButtonElement {
   // `callback` behavior makes the button look like a plain callback button
   // instead, producing "there is no submit button in the form container".
   //
-  // The init flow correlates the submit event by `message_id` (we keep
+  // The setup flow correlates the submit event by `message_id` (we keep
   // pending state keyed by the card's message id), so the button does not
-  // need to carry init_id itself.
+  // need to carry setup_id itself.
   return {
     tag: "button",
-    name: "init_submit",
+    name: "setup_submit",
     text: { tag: "plain_text", content: "✅ 初始化" },
     type: "primary",
     action_type: "form_submit",
@@ -144,7 +144,7 @@ function _buildSubmitButton(): ButtonElement {
  * Result card rendered after the submit handler finishes. Replaces the
  * original card in place via `updateRawCard`.
  */
-export function buildInitResultCard(
+export function buildSetupResultCard(
   summary: string,
   perRepoLines: string[],
 ): Card {

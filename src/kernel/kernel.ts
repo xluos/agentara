@@ -14,10 +14,10 @@ import {
 import { HonoServer } from "../server";
 
 import { CommandRegistry, parseCommand } from "./commands";
-import { InitFlow } from "./init/init-flow";
 import { MultiChannelMessageGateway } from "./messaging";
 import { SessionManager } from "./sessioning";
 import * as sessioningSchema from "./sessioning/data";
+import { SetupFlow } from "./setup/setup-flow";
 import { TaskDispatcher } from "./tasking";
 import * as taskingSchema from "./tasking/data";
 import { GroupWorkspaceStore } from "./workspaces";
@@ -36,7 +36,7 @@ class Kernel {
   private _workspaceStore!: GroupWorkspaceStore;
   private _commandRegistry!: CommandRegistry;
   private _feishuChannels = new Map<string, FeishuMessageChannel>();
-  private _initFlow!: InitFlow;
+  private _setupFlow!: SetupFlow;
 
   constructor() {
     this._initDatabase();
@@ -45,7 +45,7 @@ class Kernel {
     this._initCommandRegistry();
     this._initTaskDispatcher();
     this._initMessageGateway();
-    this._initInitFlow();
+    this._initSetupFlow();
     this._initServer();
   }
 
@@ -135,8 +135,8 @@ class Kernel {
     this._messageGateway.on("card:action", this._handleCardAction);
   }
 
-  private _initInitFlow(): void {
-    this._initFlow = new InitFlow({
+  private _initSetupFlow(): void {
+    this._setupFlow = new SetupFlow({
       workspaceStore: this._workspaceStore,
       feishuChannels: this._feishuChannels,
     });
@@ -172,10 +172,10 @@ class Kernel {
       return;
     }
 
-    // Handle /init command (kernel-owned — renders an interactive card and
+    // Handle /setup command (kernel-owned — renders an interactive card and
     // awaits a card:action callback rather than returning a plain text reply).
-    if (text === "/init") {
-      await this._initFlow.start(message);
+    if (text === "/setup") {
+      await this._setupFlow.start(message);
       return;
     }
 
@@ -285,11 +285,11 @@ class Kernel {
 
   /**
    * Route card-action callbacks by the `action_name` discriminator. Right now
-   * only `/init` produces callbacks; unknown actions are logged and dropped.
+   * only `/setup` produces callbacks; unknown actions are logged and dropped.
    */
   private _handleCardAction = async (payload: CardActionPayload) => {
-    if (payload.action_name === "init_submit") {
-      await this._initFlow.handleSubmit(payload);
+    if (payload.action_name === "setup_submit") {
+      await this._setupFlow.handleSubmit(payload);
       return;
     }
     this._logger.warn(

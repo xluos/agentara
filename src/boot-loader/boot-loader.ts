@@ -1,9 +1,11 @@
 import { execSync } from "node:child_process";
 import {
+  appendFileSync,
   existsSync,
   lstatSync,
   mkdirSync,
   mkdtempSync,
+  readFileSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -63,12 +65,21 @@ class BootLoader {
         join(config.paths.claude_home, "settings.json"),
       );
     }
-    if (!existsSync(join(config.paths.home, "CLAUDE.md"))) {
+    const claudeMdPath = join(config.paths.home, "CLAUDE.md");
+    if (!existsSync(claudeMdPath)) {
       await downloadFile(
         "https://raw.githubusercontent.com/magiccube/agentara/main/user-home/CLAUDE.md",
-        join(config.paths.home, "CLAUDE.md"),
+        claudeMdPath,
       );
     }
+    if (!existsSync(config.paths.repos_md)) {
+      writeFileSync(config.paths.repos_md, REPOS_MD_TEMPLATE, "utf-8");
+      logger.info("Seeded $AGENTARA_HOME/REPOS.md with a starter template.");
+    }
+    // Keep CLAUDE.md pointed at REPOS.md so the agent sees the catalog +
+    // descriptions in context. Idempotent: only appends when the reference
+    // is missing, so user edits to CLAUDE.md are preserved.
+    this._ensureClaudeMdReferencesRepos(claudeMdPath);
     if (!existsSync(config.paths.skills)) {
       await downloadSkills();
     }
@@ -121,6 +132,29 @@ messaging:
         mkdirSync(config.paths.codex_home, { recursive: true });
       }
       this._ensureCodexAuthSymlink();
+    }
+  }
+
+  /**
+   * Append `@REPOS.md` to `$AGENTARA_HOME/CLAUDE.md` if it isn't already
+   * referenced. The reference lets Claude Code inline the repo catalog +
+   * descriptions into the agent's context via its native `@file` import.
+   * User edits to CLAUDE.md are preserved — we only append when missing.
+   */
+  private _ensureClaudeMdReferencesRepos(claudeMdPath: string): void {
+    try {
+      if (!existsSync(claudeMdPath)) return;
+      const body = readFileSync(claudeMdPath, "utf-8");
+      if (/^\s*@REPOS\.md\s*$/m.test(body)) return;
+      const needsNewline = body.length > 0 && !body.endsWith("\n");
+      appendFileSync(
+        claudeMdPath,
+        `${needsNewline ? "\n" : ""}\n@REPOS.md\n`,
+        "utf-8",
+      );
+      logger.info("Added `@REPOS.md` reference to CLAUDE.md.");
+    } catch (err) {
+      logger.warn({ err }, "Failed to ensure CLAUDE.md references REPOS.md");
     }
   }
 
@@ -216,5 +250,34 @@ async function downloadSkills(): Promise<void> {
   execSync(`cp -r user-home/.claude/skills/* ~/.agentara/.claude/skills/`);
   execSync(`rm -rf ${tempDir}`);
 }
+
+const REPOS_MD_TEMPLATE = `# Predefined Repos
+
+<!--
+This file is the agent's repo knowledge base.
+
+- The \`/setup\` command parses each H2 section as a repo:
+    - title (\`## <name>\`)           → repo directory name
+    - \`- git_url: <url>\` bullet     → clone URL
+    - first prose line              → short description shown on the card
+- Everything else in a section is free-form prose for the agent to read
+  via CLAUDE.md's \`@REPOS.md\` import.
+- Feel free to update these descriptions as you learn more about each
+  repo — the agent is expected to maintain this file over time.
+-->
+
+<!-- Example — delete or replace with your own entries:
+
+## agentara
+
+- git_url: https://github.com/magiccube/agentara.git
+
+Bun + TypeScript personal assistant platform. Core flow is
+BootLoader → Kernel → Session/Task/Message. Useful when a group is
+discussing the assistant platform itself, session/task orchestration,
+or Feishu bot integration.
+
+-->
+`;
 
 export const bootLoader = new BootLoader();
