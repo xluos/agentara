@@ -12,6 +12,7 @@ export type {
   AppConfig,
   ChannelConfig,
   ChannelParams,
+  CodexConfig,
   MessagingConfig,
   PredefinedRepo,
   TaskingConfig,

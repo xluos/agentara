@@ -88,6 +88,8 @@ agents:
   default:
     type: claude
     model: claude-sonnet-4-6
+  codex:
+    isolate_host_env: false
 
 tasking:
   max_retries: 1
@@ -103,6 +105,22 @@ messaging:
 
     if (!existsSync(config.paths.data)) {
       mkdirSync(config.paths.data, { recursive: true });
+    }
+
+    // Codex isolation (opt-in via `agents.codex.isolate_host_env`).
+    // When off, agentara-spawned Codex inherits the host `~/.codex`
+    // verbatim.  When on, agentara points Codex at its own
+    // CODEX_HOME so config / sessions / state / skills stay
+    // separate from the host's; auth.json is symlinked so the
+    // OAuth login is shared.  Nothing agentara does can prevent
+    // Codex from loading hooks from cwd ancestors under the real
+    // home — that problem lives in the host `~/.codex/hooks.json`
+    // placement itself.
+    if (config.agents.codex.isolate_host_env) {
+      if (!existsSync(config.paths.codex_home)) {
+        mkdirSync(config.paths.codex_home, { recursive: true });
+      }
+      this._ensureCodexAuthSymlink();
     }
   }
 
@@ -128,6 +146,40 @@ messaging:
       logger.info("Created symlink .agents/skills → .claude/skills");
     } catch (err) {
       logger.warn({ err }, "Failed to create .agents/skills symlink");
+    }
+  }
+
+  /**
+   * Symlinks `$CODEX_HOME/auth.json` → `~/.codex/auth.json` so the
+   * isolated Codex home reuses the host login and OAuth token
+   * refresh stays bi-directional.  No-ops if the link already exists
+   * or the host has no auth file yet.
+   */
+  private _ensureCodexAuthSymlink(): void {
+    const hostAuth = join(config.paths.host_codex_home, "auth.json");
+    const linkPath = join(config.paths.codex_home, "auth.json");
+    try {
+      lstatSync(linkPath);
+      return;
+    } catch (e: unknown) {
+      if ((e as NodeJS.ErrnoException)?.code !== "ENOENT") {
+        logger.warn({ err: e }, "Unexpected error checking Codex auth link");
+        return;
+      }
+    }
+    if (!existsSync(hostAuth)) {
+      logger.info(
+        "Host ~/.codex/auth.json not found — skipping Codex auth symlink",
+      );
+      return;
+    }
+    try {
+      symlinkSync(hostAuth, linkPath, "file");
+      logger.info(
+        "Created symlink $AGENTARA_HOME/.codex/auth.json → ~/.codex/auth.json",
+      );
+    } catch (err) {
+      logger.warn({ err }, "Failed to create Codex auth symlink");
     }
   }
 

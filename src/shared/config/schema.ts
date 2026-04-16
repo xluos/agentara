@@ -10,10 +10,28 @@ export const AgentConfig = z.object({
 export interface AgentConfig extends z.infer<typeof AgentConfig> {}
 
 /**
+ * Codex CLI-specific runtime options.
+ */
+export const CodexConfig = z.object({
+  /**
+   * When `true`, agentara points spawned Codex at its own
+   * `CODEX_HOME` so config / sessions / state / skills stay
+   * separate from the host's `~/.codex/`.  Host `~/.codex/hooks.json`
+   * is still loaded by Codex via its cwd-ancestor climb — move
+   * that file out of `~/.codex/` yourself if you need it to skip
+   * agentara workspaces.  Default `false` — agentara reuses the
+   * host setup.
+   */
+  isolate_host_env: z.boolean().default(false),
+});
+export interface CodexConfig extends z.infer<typeof CodexConfig> {}
+
+/**
  * Configuration for all agents.
  */
 export const AgentsConfig = z.object({
   default: AgentConfig,
+  codex: CodexConfig.default({ isolate_host_env: false }),
 });
 export interface AgentsConfig extends z.infer<typeof AgentsConfig> {}
 

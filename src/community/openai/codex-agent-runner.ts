@@ -59,10 +59,23 @@ export class CodexAgentRunner implements AgentRunner {
       prompt: textContentOfUserMessage,
     });
 
+    // Gated by `agents.codex.isolate_host_env` — off by default,
+    // in which case Codex inherits the host env verbatim.  When on,
+    // CODEX_HOME is redirected so config / sessions / state stay
+    // separate from the host's `~/.codex/`.  Host hook behavior is
+    // not touched here — Codex always climbs cwd ancestors for
+    // `.codex/hooks.json` regardless of CODEX_HOME, so keep your
+    // global hooks.json out of `~/.codex/` if you do not want it
+    // firing under agentara workspaces.
+    const isolationEnv = config.agents.codex.isolate_host_env
+      ? { CODEX_HOME: config.paths.codex_home }
+      : {};
+
     const proc = Bun.spawn(args, {
       cwd: options.cwd,
       env: {
         ...Bun.env,
+        ...isolationEnv,
         ...(options.envExtras ?? {}),
       },
       stderr: "pipe",

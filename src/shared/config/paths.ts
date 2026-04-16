@@ -54,3 +54,13 @@ export const claude_home = join(home, ".claude");
 export const skills = join(claude_home, "skills");
 
 export const agents_home = join(home, ".agents");
+
+/**
+ * Isolated `CODEX_HOME` for spawned Codex CLI processes.  Keeps
+ * Codex's base config, sessions, state, and skills separate from
+ * the host's `~/.codex/`.  Boot-loader seeds an `auth.json` symlink
+ * so the OAuth login is shared bi-directionally.  Activated only
+ * when `agents.codex.isolate_host_env` is `true`.
+ */
+export const codex_home = join(home, ".codex");
+export const host_codex_home = join(user_home, ".codex");
