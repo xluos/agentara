@@ -37,6 +37,22 @@ export interface SessionResolveOptions {
   channelId?: string;
 
   /**
+   * Feishu chat_id for this session. Stored on create, not used on resume.
+   */
+  chatId?: string | null;
+
+  /**
+   * Feishu thread/topic id for this session. Stored on create, not used on resume.
+   */
+  threadId?: string | null;
+
+  /**
+   * Extra env vars to pass into the runner spawn (e.g. DEV_ASSETS_PRIMARY_REPO).
+   * Not persisted; re-resolved on every dispatch from group binding.
+   */
+  envExtras?: Record<string, string>;
+
+  /**
    * The first message of the session.
    */
   firstMessage?: UserMessage;
@@ -110,6 +126,9 @@ export class SessionManager {
     const agentType = options?.agentType ?? config.agents.default.type;
     const cwd = options?.cwd ?? config.paths.home;
     const channelId = options?.channelId ?? null;
+    const chatId = options?.chatId ?? null;
+    const threadId = options?.threadId ?? null;
+    const envExtras = options?.envExtras;
     const now = Date.now();
 
     this._db
@@ -119,6 +138,8 @@ export class SessionManager {
         agent_type: agentType,
         cwd,
         channel_id: channelId,
+        chat_id: chatId,
+        thread_id: threadId,
         last_message_created_at: null,
         runner_session_id: null,
         created_at: now,
@@ -137,6 +158,7 @@ export class SessionManager {
     const session = new Session(sessionId, agentType, {
       isNewSession: true,
       cwd,
+      envExtras,
       runnerSessionId: undefined,
     });
     this._attachWriter(session, sessionId);
@@ -172,6 +194,7 @@ export class SessionManager {
       {
         isNewSession: false,
         cwd: options?.cwd ?? row.cwd,
+        envExtras: options?.envExtras,
         runnerSessionId: row.runner_session_id ?? undefined,
       },
     );

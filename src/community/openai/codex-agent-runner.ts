@@ -63,6 +63,7 @@ export class CodexAgentRunner implements AgentRunner {
       cwd: options.cwd,
       env: {
         ...Bun.env,
+        ...(options.envExtras ?? {}),
       },
       stderr: "pipe",
     });

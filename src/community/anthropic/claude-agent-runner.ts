@@ -53,6 +53,7 @@ export class ClaudeAgentRunner implements AgentRunner {
       cwd: options.cwd,
       env: {
         ...Bun.env,
+        ...(options.envExtras ?? {}),
         ANTHROPIC_API_KEY: "",
       },
       stderr: "pipe",

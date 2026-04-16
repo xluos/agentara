@@ -27,6 +27,13 @@ export const AgentRunOptions = z.object({
   runnerSessionId: z.string().optional(),
 
   /**
+   * Extra environment variables merged into the runner's spawn env. Used to
+   * thread per-group hints (e.g. `DEV_ASSETS_PRIMARY_REPO`) into Claude/Codex
+   * CLI invocations without touching the caller's process env.
+   */
+  envExtras: z.record(z.string(), z.string()).optional(),
+
+  /**
    * Abort signal for cancelling the running task.
    * When aborted, the agent runner should kill any spawned subprocesses.
    */

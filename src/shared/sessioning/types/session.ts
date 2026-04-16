@@ -15,6 +15,10 @@ export const Session = z.object({
   cwd: z.string(),
   /** The channel id this session belongs to, or null/undefined for legacy sessions. */
   channel_id: z.string().optional().nullable(),
+  /** Feishu chat_id owning this session; null for non-Feishu sessions. */
+  chat_id: z.string().optional().nullable(),
+  /** Feishu topic/thread id for this session; null for non-threaded sessions. */
+  thread_id: z.string().optional().nullable(),
   /** The text content of the session's first inbound message. */
   first_message: z.string(),
   /** Runner-specific session/thread id (e.g. Codex thread id), if available. */

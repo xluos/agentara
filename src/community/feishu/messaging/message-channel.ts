@@ -547,12 +547,19 @@ export class FeishuMessageChannel
   private _handleMessageReceive = async ({
     message: receivedMessage,
   }: MessageReceiveEventData) => {
-    const { message_id: messageId, thread_id: threadId } = receivedMessage;
-    const session_id = this._resolveSessionId(threadId);
+    const {
+      message_id: messageId,
+      thread_id: threadId,
+      chat_id: chatId,
+    } = receivedMessage;
+    const session_id = this._resolveSessionId(chatId, threadId);
     const userMessage: UserMessage = {
       id: messageId,
       session_id,
       role: "user",
+      channel_id: this.id,
+      chat_id: chatId,
+      thread_id: threadId,
       content: [
         await this._parseMessageContent(
           messageId,
@@ -591,8 +598,23 @@ export class FeishuMessageChannel
       .run();
   }
 
-  /** Resolve a session ID from a thread ID, falling back to DB then generating a new one. */
-  private _resolveSessionId(threadId: string | undefined): string {
+  /**
+   * Resolve session id for an inbound Feishu message.
+   *
+   * Lookup order:
+   * 1. In-memory thread→session cache
+   * 2. `feishu_threads` DB mapping (populated when the bot replies and Feishu
+   *    creates a new thread — see `_mapThreadToSession`)
+   * 3. When both chat_id + thread_id are known, derive deterministically as
+   *    `feishu:<chat>:<thread>` and persist that mapping so subsequent lookups
+   *    short-circuit.
+   * 4. Fall back to `uuid()` when no thread_id (first @mention outside any
+   *    topic).
+   */
+  private _resolveSessionId(
+    chatId: string | undefined,
+    threadId: string | undefined,
+  ): string {
     if (threadId && this._threadIdToSessionId.has(threadId)) {
       return this._threadIdToSessionId.get(threadId)!;
     }
@@ -605,6 +627,11 @@ export class FeishuMessageChannel
       if (row) {
         this._threadIdToSessionId.set(threadId, row.session_id);
         return row.session_id;
+      }
+      if (chatId) {
+        const derived = `feishu:${chatId}:${threadId}`;
+        this._mapThreadToSession(threadId, derived);
+        return derived;
       }
     }
     return uuid();

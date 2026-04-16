@@ -46,6 +46,10 @@ export const UserMessage = BaseMessage.extend({
   role: z.literal("user"),
   /** The channel id this message originated from. */
   channel_id: z.string().optional(),
+  /** Feishu chat_id, when this message originated from a Feishu channel. */
+  chat_id: z.string().optional(),
+  /** Feishu topic/thread id, when the message is inside a topic. */
+  thread_id: z.string().optional(),
   content: z.array(
     z.discriminatedUnion("type", [
       TextMessageContent,

@@ -13,11 +13,13 @@ import {
 
 import { HonoServer } from "../server";
 
+import { CommandRegistry, parseCommand } from "./commands";
 import { MultiChannelMessageGateway } from "./messaging";
 import { SessionManager } from "./sessioning";
 import * as sessioningSchema from "./sessioning/data";
 import { TaskDispatcher } from "./tasking";
 import * as taskingSchema from "./tasking/data";
+import { GroupWorkspaceStore } from "./workspaces";
 
 /**
  * The kernel is the main entry point for the agentara application.
@@ -30,10 +32,14 @@ class Kernel {
   private _taskDispatcher!: TaskDispatcher;
   private _messageGateway!: MultiChannelMessageGateway;
   private _honoServer!: HonoServer;
+  private _workspaceStore!: GroupWorkspaceStore;
+  private _commandRegistry!: CommandRegistry;
 
   constructor() {
     this._initDatabase();
     this._initSessionManager();
+    this._initWorkspaceStore();
+    this._initCommandRegistry();
     this._initTaskDispatcher();
     this._initMessageGateway();
     this._initServer();
@@ -65,6 +71,15 @@ class Kernel {
 
   private _initSessionManager(): void {
     this._sessionManager = new SessionManager(this._database.db);
+  }
+
+  private _initWorkspaceStore(): void {
+    this._workspaceStore = new GroupWorkspaceStore(this._database.db);
+    this._workspaceStore.ensureBaseDirs();
+  }
+
+  private _initCommandRegistry(): void {
+    this._commandRegistry = new CommandRegistry();
   }
 
   private _initServer(): void {
@@ -114,10 +129,16 @@ class Kernel {
   private _handleInboundMessage = async (message: UserMessage) => {
     const text = extractTextContent(message).trim();
 
-    // Handle /stop command
+    // Handle /stop command (kernel-owned because it talks to TaskDispatcher)
     if (text === "/stop") {
       await this._handleStopCommand(message);
       return;
+    }
+
+    // Try gateway-level slash commands before dispatching to the LLM.
+    if (text.startsWith("/")) {
+      const handled = await this._tryHandleCommand(message, text);
+      if (handled) return;
     }
 
     const task: InboundMessageTaskPayload = {
@@ -125,6 +146,38 @@ class Kernel {
       message,
     };
     await this._taskDispatcher.dispatch(message.session_id, task);
+  };
+
+  private _tryHandleCommand = async (
+    message: UserMessage,
+    text: string,
+  ): Promise<boolean> => {
+    const parsed = parseCommand(text);
+    if (!parsed) return false;
+    const handler = this._commandRegistry.get(parsed.name);
+    if (!handler) return false;
+    let replyText: string;
+    try {
+      replyText = await handler.execute({
+        message,
+        args: parsed.args,
+        raw: parsed.raw,
+        workspaceStore: this._workspaceStore,
+        logger: this._logger,
+      });
+    } catch (err) {
+      this._logger.error(
+        { err, command: parsed.name, chat_id: message.chat_id },
+        "command handler failed",
+      );
+      replyText = `❌ Command \`/${parsed.name}\` failed: ${(err as Error).message}`;
+    }
+    await this._messageGateway.replyMessage(message.id, {
+      role: "assistant",
+      session_id: message.session_id,
+      content: [{ type: "text", text: replyText }],
+    });
+    return true;
   };
 
   private _handleStopCommand = async (message: UserMessage) => {
@@ -169,8 +222,31 @@ class Kernel {
     signal?: AbortSignal,
   ) => {
     const inboundMessage = payload.message;
+    const resolution = this._workspaceStore.resolve(inboundMessage.chat_id);
+    if (resolution.binding?.active_repo && resolution.binding.active_branch) {
+      // Idempotent pre-checkout so the active repo is on the bound branch
+      // before the runner spawns. Runs synchronously with the dispatch — if
+      // it fails, we still proceed (binding may need user repair).
+      try {
+        const repoPath = `${resolution.binding.workspace_path}/${resolution.binding.active_repo}`;
+        const proc = Bun.spawn(
+          ["git", "-C", repoPath, "checkout", resolution.binding.active_branch],
+          { stdout: "pipe", stderr: "pipe" },
+        );
+        await proc.exited;
+      } catch (err) {
+        this._logger.warn(
+          { err, chat_id: inboundMessage.chat_id, binding: resolution.binding },
+          "pre-dispatch git checkout failed; continuing",
+        );
+      }
+    }
     const session = await this._sessionManager.resolveSession(sessionId, {
       channelId: inboundMessage.channel_id,
+      chatId: inboundMessage.chat_id,
+      threadId: inboundMessage.thread_id,
+      cwd: resolution.cwd,
+      envExtras: resolution.envExtras,
       firstMessage: inboundMessage,
     });
     let contents: AssistantMessage["content"] = [

@@ -44,6 +44,12 @@ class BootLoader {
     if (!existsSync(config.paths.outputs)) {
       mkdirSync(config.paths.outputs, { recursive: true });
     }
+    if (!existsSync(config.paths.workspaces)) {
+      mkdirSync(config.paths.workspaces, { recursive: true });
+    }
+    if (!existsSync(config.paths.default_workspace)) {
+      mkdirSync(config.paths.default_workspace, { recursive: true });
+    }
 
     if (!existsSync(config.paths.memory)) {
       mkdirSync(config.paths.memory, { recursive: true });

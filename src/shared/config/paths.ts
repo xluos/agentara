@@ -23,6 +23,16 @@ export const projects = join(workspace, "projects");
 export const uploads = join(workspace, "uploads");
 export const outputs = join(workspace, "outputs");
 
+/**
+ * Per-group workspace root container: `$AGENTARA_HOME/workspaces/<chat_id>/`.
+ * `_default/` inside it is the fallback workspace for unbound groups.
+ */
+export const workspaces = join(home, "workspaces");
+export const default_workspace = join(workspaces, "_default");
+export function resolveGroupWorkspacePath(chat_id: string) {
+  return join(workspaces, chat_id);
+}
+
 export const data = join(home, "data");
 export function resolveDataFilePath(filename: string) {
   return join(data, filename);
