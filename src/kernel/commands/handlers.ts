@@ -8,6 +8,9 @@ import type { CommandContext, CommandHandler } from "./types";
  * TaskDispatcher. All commands are scoped to the current Feishu `chat_id`
  * unless noted. Missing `chat_id` means the message came from a source
  * that doesn't support group bindings; we reject those commands politely.
+ *
+ * User-facing copy is intentionally in Chinese — these commands surface
+ * directly in Feishu group chats where the audience is Chinese-speaking.
  */
 
 function requireChatId(ctx: CommandContext): string | null {
@@ -37,23 +40,23 @@ async function execGit(
 
 const bindHandler: CommandHandler = {
   name: "bind",
-  description: "/bind <repo> <branch> — bind current group to a repo + branch",
+  description: "/bind <仓库> <分支> — 绑定当前群到指定仓库和分支",
   async execute(ctx) {
     const chatId = requireChatId(ctx);
-    if (!chatId) return "❌ /bind requires a Feishu group context.";
+    if (!chatId) return "❌ /bind 仅在飞书群内可用。";
     const [repo, branch] = ctx.args;
     if (!repo || !branch) {
-      return "Usage: `/bind <repo-dir-basename> <branch>`\nHint: clone first via `/clone <git-url>`.";
+      return "用法：`/bind <仓库目录名> <分支>`\n提示：若还未克隆，先用 `/clone <git-url>`。";
     }
     const resolution = ctx.workspaceStore.resolve(chatId);
     const workspacePath = resolution.binding?.workspace_path ?? resolution.cwd;
     const repoPath = join(workspacePath, repo);
     if (!existsSync(repoPath) || !existsSync(join(repoPath, ".git"))) {
-      return `❌ \`${repo}\` not found under workspace \`${workspacePath}\`. Run \`/clone <git-url>\` first, or check \`/ls\`.`;
+      return `❌ 在 workspace 中找不到 \`${repo}\`（\`${workspacePath}\`）。请先 \`/clone <git-url>\`，或用 \`/ls\` 查看已克隆的仓库。`;
     }
     const checkout = await execGit(["checkout", branch], repoPath);
     if (!checkout.ok) {
-      return `❌ \`git checkout ${branch}\` failed:\n\`\`\`\n${checkout.stderr || checkout.stdout}\n\`\`\``;
+      return `❌ \`git checkout ${branch}\` 失败：\n\`\`\`\n${checkout.stderr || checkout.stdout}\n\`\`\``;
     }
     const binding = ctx.workspaceStore.upsertBinding(chatId, {
       active_repo: repo,
@@ -61,57 +64,57 @@ const bindHandler: CommandHandler = {
     });
     ctx.logger.info({ chat_id: chatId, binding }, "group binding updated");
     return [
-      `✅ Bound group to \`${repo}\` @ \`${branch}\``,
-      `Workspace: \`${binding.workspace_path}\``,
-      `Next messages will use this repo+branch until \`/unbind\` or another \`/bind\`.`,
+      `✅ 已将当前群绑定到 \`${repo}\` @ \`${branch}\``,
+      `Workspace：\`${binding.workspace_path}\``,
+      `后续消息将使用该仓库和分支，直到再次 \`/bind\` 或 \`/unbind\`。`,
     ].join("\n");
   },
 };
 
 const unbindHandler: CommandHandler = {
   name: "unbind",
-  description: "/unbind — clear this group's binding (fall back to default workspace)",
+  description: "/unbind — 清除当前群的绑定（回退到默认 workspace）",
   async execute(ctx) {
     const chatId = requireChatId(ctx);
-    if (!chatId) return "❌ /unbind requires a Feishu group context.";
+    if (!chatId) return "❌ /unbind 仅在飞书群内可用。";
     const removed = ctx.workspaceStore.deleteBinding(chatId);
-    if (!removed) return "ℹ️  This group is not bound.";
-    return "✅ Group binding cleared. Future messages will use the default workspace.";
+    if (!removed) return "ℹ️  当前群未绑定。";
+    return "✅ 群绑定已清除。后续消息将使用默认 workspace。";
   },
 };
 
 const statusHandler: CommandHandler = {
   name: "status",
-  description: "/status — show current group binding + cloned repos",
+  description: "/status — 查看当前群的绑定及已克隆的仓库",
   async execute(ctx) {
     const chatId = requireChatId(ctx);
     if (!chatId) {
       return [
-        "ℹ️  No Feishu group context — running on the default workspace.",
-        `Default: \`${ctx.workspaceStore.resolve(null).cwd}\``,
+        "ℹ️  当前不在飞书群上下文，正在使用默认 workspace。",
+        `默认路径：\`${ctx.workspaceStore.resolve(null).cwd}\``,
       ].join("\n");
     }
     const resolution = ctx.workspaceStore.resolve(chatId);
     const lines: string[] = [];
     if (!resolution.binding) {
-      lines.push("ℹ️  This group is **not bound**.");
-      lines.push(`Default workspace: \`${resolution.cwd}\``);
-      lines.push("Use `/bind <repo> <branch>` or `/clone <url>` to set up.");
+      lines.push("ℹ️  当前群 **未绑定**。");
+      lines.push(`默认 workspace：\`${resolution.cwd}\``);
+      lines.push("使用 `/bind <仓库> <分支>` 或 `/clone <git-url>` 来初始化。");
       return lines.join("\n");
     }
-    lines.push("**Group binding:**");
-    lines.push(`- Workspace: \`${resolution.binding.workspace_path}\``);
-    lines.push(`- Active repo: \`${resolution.binding.active_repo ?? "(none)"}\``);
-    lines.push(`- Active branch: \`${resolution.binding.active_branch ?? "(none)"}\``);
+    lines.push("**当前群绑定：**");
+    lines.push(`- Workspace：\`${resolution.binding.workspace_path}\``);
+    lines.push(`- 活跃仓库：\`${resolution.binding.active_repo ?? "(未设置)"}\``);
+    lines.push(`- 活跃分支：\`${resolution.binding.active_branch ?? "(未设置)"}\``);
     const repos = listRepoBasenames(resolution.binding.workspace_path);
     if (repos.length > 0) {
-      lines.push("", "**Cloned repos in workspace:**");
+      lines.push("", "**Workspace 中已克隆的仓库：**");
       for (const name of repos) lines.push(`- \`${name}\``);
     } else {
-      lines.push("", "_Workspace has no cloned repos yet._");
+      lines.push("", "_Workspace 还没有克隆任何仓库。_");
     }
     if (ctx.message.thread_id) {
-      lines.push("", `**This topic's session:** \`${ctx.message.session_id}\``);
+      lines.push("", `**当前话题的 session：** \`${ctx.message.session_id}\``);
     }
     return lines.join("\n");
   },
@@ -119,19 +122,19 @@ const statusHandler: CommandHandler = {
 
 const lsHandler: CommandHandler = {
   name: "ls",
-  description: "/ls — list cloned repos in current group's workspace",
+  description: "/ls — 列出当前群 workspace 下的所有仓库",
   async execute(ctx) {
     const chatId = requireChatId(ctx);
     const resolution = ctx.workspaceStore.resolve(chatId ?? null);
     const workspacePath = resolution.binding?.workspace_path ?? resolution.cwd;
     const repos = listRepoBasenames(workspacePath);
     if (repos.length === 0) {
-      return `_No repos under \`${workspacePath}\`. Use \`/clone <git-url>\` to add one._`;
+      return `_\`${workspacePath}\` 下还没有仓库。使用 \`/clone <git-url>\` 添加一个。_`;
     }
     const primary = resolution.binding?.active_repo;
-    const lines = [`**Repos in \`${workspacePath}\`:**`];
+    const lines = [`**\`${workspacePath}\` 下的仓库：**`];
     for (const name of repos) {
-      const mark = name === primary ? " ← active" : "";
+      const mark = name === primary ? " ← 活跃" : "";
       lines.push(`- \`${name}\`${mark}`);
     }
     return lines.join("\n");
@@ -140,12 +143,12 @@ const lsHandler: CommandHandler = {
 
 const cloneHandler: CommandHandler = {
   name: "clone",
-  description: "/clone <git-url> [name] — clone a repo into current group's workspace",
+  description: "/clone <git-url> [别名] — 将仓库克隆到当前群的 workspace",
   async execute(ctx) {
     const chatId = requireChatId(ctx);
-    if (!chatId) return "❌ /clone requires a Feishu group context.";
+    if (!chatId) return "❌ /clone 仅在飞书群内可用。";
     const [url, explicitName] = ctx.args;
-    if (!url) return "Usage: `/clone <git-url> [name]`";
+    if (!url) return "用法：`/clone <git-url> [别名]`";
     const resolution = ctx.workspaceStore.resolve(chatId);
     const workspacePath = resolution.binding?.workspace_path ?? resolution.cwd;
     // Ensure binding row exists so workspace_path is persisted even before active_repo is picked
@@ -155,31 +158,31 @@ const cloneHandler: CommandHandler = {
     const name = explicitName || deriveRepoName(url);
     const targetPath = join(workspacePath, name);
     if (existsSync(targetPath)) {
-      return `❌ \`${name}\` already exists in workspace. Choose a different name or \`/ls\` to inspect.`;
+      return `❌ workspace 中已存在 \`${name}\`，请换个别名，或使用 \`/ls\` 查看已克隆的仓库。`;
     }
     ctx.logger.info({ chat_id: chatId, url, name }, "cloning repo");
     const result = await execGit(["clone", url, name], workspacePath);
     if (!result.ok) {
-      return `❌ \`git clone\` failed:\n\`\`\`\n${result.stderr || result.stdout}\n\`\`\``;
+      return `❌ \`git clone\` 失败：\n\`\`\`\n${result.stderr || result.stdout}\n\`\`\``;
     }
     return [
-      `✅ Cloned \`${name}\` into workspace.`,
-      `Use \`/bind ${name} <branch>\` to make it the active repo for this group.`,
+      `✅ 已克隆 \`${name}\` 到 workspace。`,
+      `使用 \`/bind ${name} <分支>\` 将其设为当前群的活跃仓库。`,
     ].join("\n");
   },
 };
 
 const checkoutHandler: CommandHandler = {
   name: "checkout",
-  description: "/checkout <branch> — switch the active repo's branch",
+  description: "/checkout <分支> — 切换当前活跃仓库的分支",
   async execute(ctx) {
     const chatId = requireChatId(ctx);
-    if (!chatId) return "❌ /checkout requires a Feishu group context.";
+    if (!chatId) return "❌ /checkout 仅在飞书群内可用。";
     const [branch] = ctx.args;
-    if (!branch) return "Usage: `/checkout <branch>`";
+    if (!branch) return "用法：`/checkout <分支>`";
     const resolution = ctx.workspaceStore.resolve(chatId);
     if (!resolution.binding?.active_repo) {
-      return "❌ No active repo. Run `/bind <repo> <branch>` first.";
+      return "❌ 当前群没有活跃仓库。请先执行 `/bind <仓库> <分支>`。";
     }
     const repoPath = join(
       resolution.binding.workspace_path,
@@ -188,26 +191,26 @@ const checkoutHandler: CommandHandler = {
     // Reject dirty tree so the user can't accidentally drop uncommitted work
     const status = await execGit(["status", "--short"], repoPath);
     if (status.stdout) {
-      return `❌ Dirty tree in \`${resolution.binding.active_repo}\`, refusing to checkout.\n\`\`\`\n${status.stdout}\n\`\`\``;
+      return `❌ \`${resolution.binding.active_repo}\` 工作区有未提交改动，拒绝切换分支：\n\`\`\`\n${status.stdout}\n\`\`\``;
     }
     const result = await execGit(["checkout", branch], repoPath);
     if (!result.ok) {
-      return `❌ \`git checkout ${branch}\` failed:\n\`\`\`\n${result.stderr || result.stdout}\n\`\`\``;
+      return `❌ \`git checkout ${branch}\` 失败：\n\`\`\`\n${result.stderr || result.stdout}\n\`\`\``;
     }
     ctx.workspaceStore.upsertBinding(chatId, { active_branch: branch });
-    return `✅ \`${resolution.binding.active_repo}\` is now on branch \`${branch}\`.`;
+    return `✅ \`${resolution.binding.active_repo}\` 已切换到分支 \`${branch}\`。`;
   },
 };
 
 export const helpHandler: CommandHandler = {
   name: "help",
-  description: "/help — show available commands",
+  description: "/help — 显示所有可用命令",
   async execute() {
     return [
-      "**Gateway commands (bypass LLM):**",
+      "**可用命令（不经大模型直接执行）：**",
       ...BUILTIN_COMMANDS.map((h) => `- ${h.description}`),
-      "- /help — this message",
-      "- /stop — cancel the running task in this session",
+      "- /help — 显示本消息",
+      "- /stop — 取消当前 session 正在执行的任务",
     ].join("\n");
   },
 };

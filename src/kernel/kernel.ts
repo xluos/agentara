@@ -127,7 +127,11 @@ class Kernel {
   }
 
   private _handleInboundMessage = async (message: UserMessage) => {
-    const text = extractTextContent(message).trim();
+    // Feishu substitutes @mentions as `@_user_N` placeholders in the text body;
+    // strip them so `@bot /bind foo bar` routes through the slash command path.
+    const text = extractTextContent(message)
+      .replace(/@_user_\d+/g, "")
+      .trim();
 
     // Handle /stop command (kernel-owned because it talks to TaskDispatcher)
     if (text === "/stop") {
@@ -170,7 +174,7 @@ class Kernel {
         { err, command: parsed.name, chat_id: message.chat_id },
         "command handler failed",
       );
-      replyText = `❌ Command \`/${parsed.name}\` failed: ${(err as Error).message}`;
+      replyText = `❌ 命令 \`/${parsed.name}\` 执行失败：${(err as Error).message}`;
     }
     await this._messageGateway.replyMessage(message.id, {
       role: "assistant",
@@ -190,13 +194,13 @@ class Kernel {
       await this._messageGateway.replyMessage(message.id, {
         role: "assistant",
         session_id: sessionId,
-        content: [{ type: "text", text: "Task stopped." }],
+        content: [{ type: "text", text: "✅ 任务已取消。" }],
       });
     } else {
       await this._messageGateway.replyMessage(message.id, {
         role: "assistant",
         session_id: sessionId,
-        content: [{ type: "text", text: "No running task found." }],
+        content: [{ type: "text", text: "ℹ️  当前 session 没有正在执行的任务。" }],
       });
     }
   };
