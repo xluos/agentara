@@ -100,6 +100,15 @@ class Kernel {
   private _initMessageGateway(): void {
     this._messageGateway = new MultiChannelMessageGateway(this._database.db);
     for (const channel of config.messaging.channels) {
+      const splitCsv = (raw: string | undefined) =>
+        (raw ?? "")
+          .split(",")
+          .map((s) => s.trim())
+          .filter(Boolean);
+      const allowedOpenIds = splitCsv(channel.params.allowed_user_ids);
+      const allowedEmails = splitCsv(channel.params.allowed_user_emails);
+      const requireMention =
+        (channel.params.require_mention ?? "").toLowerCase() === "true";
       this._messageGateway.registerChannel(
         new FeishuMessageChannel(
           channel.id,
@@ -107,6 +116,11 @@ class Kernel {
             chatId: channel.params.chat_id!,
             appId: channel.params.app_id!,
             appSecret: channel.params.app_secret!,
+            requireMention,
+            allowedUserOpenIds:
+              allowedOpenIds.length > 0 ? allowedOpenIds : undefined,
+            allowedUserEmails:
+              allowedEmails.length > 0 ? allowedEmails : undefined,
           },
           this._database.db,
         ),

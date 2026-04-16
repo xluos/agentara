@@ -58,10 +58,20 @@ export class FeishuMessageChannel
   private _db: DrizzleDB;
   private _failedCardUpdateMessages = new Set<string>();
   private _logger: Logger;
+  private _requireMention: boolean;
+  private _botOpenId?: string;
+  private _allowedUserOpenIds?: Set<string>;
+  private _allowedUserEmails?: string[];
 
   /**
    * Create a Feishu message channel.
-   * @param config - Feishu app credentials (defaults to env vars).
+   * @param config - Feishu app credentials, plus optional inbound filters:
+   *   - `requireMention`: when true, group-chat messages must @mention the bot.
+   *     The bot's own open_id is resolved at `start()` via `/bot/v3/info`. P2P
+   *     messages bypass the check — they are obviously directed at the bot.
+   *   - `allowedUserOpenIds` / `allowedUserEmails`: when either is non-empty,
+   *     the sender's open_id must be in the union of the two sets. Emails are
+   *     resolved to open_ids at `start()` via `/contact/v3/users/batch_get_id`.
    * @param db - Drizzle database instance for persisting thread-to-session mappings.
    */
   constructor(
@@ -70,6 +80,9 @@ export class FeishuMessageChannel
       chatId: string;
       appId: string;
       appSecret: string;
+      requireMention?: boolean;
+      allowedUserOpenIds?: string[];
+      allowedUserEmails?: string[];
     },
     db: DrizzleDB,
   ) {
@@ -80,6 +93,13 @@ export class FeishuMessageChannel
     }
     this._db = db;
     this._logger = createLogger("feishu-message-channel");
+    this._requireMention = !!config.requireMention;
+    if (config.allowedUserOpenIds && config.allowedUserOpenIds.length > 0) {
+      this._allowedUserOpenIds = new Set(config.allowedUserOpenIds);
+    }
+    if (config.allowedUserEmails && config.allowedUserEmails.length > 0) {
+      this._allowedUserEmails = config.allowedUserEmails;
+    }
     this._inboundClient = new WSClient({
       appId: this.config.appId,
       appSecret: this.config.appSecret,
@@ -92,12 +112,148 @@ export class FeishuMessageChannel
 
   /** Start listening for inbound messages via WebSocket. */
   async start() {
+    const needsToken = this._requireMention || !!this._allowedUserEmails;
+    const tenantToken = needsToken ? await this._fetchTenantAccessToken() : null;
+
+    if (this._requireMention && tenantToken) {
+      this._botOpenId = await this._fetchBotOpenId(tenantToken);
+      this._logger.info(
+        { bot_open_id: this._botOpenId },
+        "resolved bot open_id for @mention filtering",
+      );
+    }
+
+    if (this._allowedUserEmails && tenantToken) {
+      const resolved = await this._resolveEmailsToOpenIds(
+        this._allowedUserEmails,
+        tenantToken,
+      );
+      if (!this._allowedUserOpenIds) {
+        this._allowedUserOpenIds = new Set();
+      }
+      for (const openId of resolved.values()) {
+        this._allowedUserOpenIds.add(openId);
+      }
+      const unresolved = this._allowedUserEmails.filter(
+        (e) => !resolved.has(e),
+      );
+      this._logger.info(
+        {
+          resolved_count: resolved.size,
+          unresolved,
+          total_whitelist: this._allowedUserOpenIds.size,
+        },
+        "resolved email whitelist to open_ids",
+      );
+      if (unresolved.length > 0) {
+        this._logger.warn(
+          { unresolved },
+          "some whitelisted emails could not be resolved to an open_id",
+        );
+      }
+    }
+
     await this._inboundClient.start({
       eventDispatcher: new EventDispatcher({}).register({
         "im.message.receive_v1": this._handleMessageReceive,
         "im.message.recalled_v1": this._handleMessageRecall,
       }),
     });
+  }
+
+  /**
+   * Exchange app credentials for a tenant access token. Used for REST calls
+   * that the node-sdk doesn't expose directly (bot info, email→id lookup).
+   */
+  private async _fetchTenantAccessToken(): Promise<string> {
+    const res = await fetch(
+      "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json; charset=utf-8" },
+        body: JSON.stringify({
+          app_id: this.config.appId,
+          app_secret: this.config.appSecret,
+        }),
+      },
+    );
+    const json = (await res.json()) as {
+      code: number;
+      msg: string;
+      tenant_access_token?: string;
+    };
+    if (json.code !== 0 || !json.tenant_access_token) {
+      throw new Error(
+        `Failed to obtain tenant_access_token: ${json.code} ${json.msg}`,
+      );
+    }
+    return json.tenant_access_token;
+  }
+
+  /**
+   * Fetch the bot's own open_id via `/bot/v3/info`. Requires the bot app to
+   * have "Get bot info" permission. Throws on failure — we'd rather fail loud
+   * than silently accept every message when the user asked for mention-only.
+   */
+  private async _fetchBotOpenId(tenantToken: string): Promise<string> {
+    const res = await fetch("https://open.feishu.cn/open-apis/bot/v3/info", {
+      method: "GET",
+      headers: { Authorization: `Bearer ${tenantToken}` },
+    });
+    const json = (await res.json()) as {
+      code: number;
+      msg: string;
+      bot?: { open_id?: string };
+    };
+    if (json.code !== 0 || !json.bot?.open_id) {
+      throw new Error(`Failed to fetch bot info: ${json.code} ${json.msg}`);
+    }
+    return json.bot.open_id;
+  }
+
+  /**
+   * Resolve emails to open_ids via `/contact/v3/users/batch_get_id`. Requires
+   * the bot app to have "Get user ID by mobile/email" permission. Emails that
+   * don't map to a user are omitted from the returned map (the caller logs
+   * unresolved entries). Batches of 50 per the API limit.
+   */
+  private async _resolveEmailsToOpenIds(
+    emails: string[],
+    tenantToken: string,
+  ): Promise<Map<string, string>> {
+    const result = new Map<string, string>();
+    for (let i = 0; i < emails.length; i += 50) {
+      const batch = emails.slice(i, i + 50);
+      const res = await fetch(
+        "https://open.feishu.cn/open-apis/contact/v3/users/batch_get_id?user_id_type=open_id",
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${tenantToken}`,
+            "Content-Type": "application/json; charset=utf-8",
+          },
+          body: JSON.stringify({ emails: batch, mobiles: [] }),
+        },
+      );
+      const json = (await res.json()) as {
+        code: number;
+        msg: string;
+        data?: {
+          user_list?: Array<{ email?: string; user_id?: string }>;
+        };
+      };
+      if (json.code !== 0) {
+        throw new Error(
+          `Failed to resolve emails (${batch.length}): ${json.code} ${json.msg}`,
+        );
+      }
+      for (const entry of json.data?.user_list ?? []) {
+        if (entry.email && entry.user_id) {
+          result.set(entry.email, entry.user_id);
+        }
+      }
+    }
+    return result;
   }
 
   /** Reply to a message in a Feishu chat thread. */
@@ -544,14 +700,58 @@ export class FeishuMessageChannel
     this._logger.info([sessionId, finalText], "Final Feishu outbound content");
   }
 
-  private _handleMessageReceive = async ({
-    message: receivedMessage,
-  }: MessageReceiveEventData) => {
+  private _handleMessageReceive = async (
+    eventData: MessageReceiveEventData,
+  ) => {
+    const { sender, message: receivedMessage } = eventData;
     const {
       message_id: messageId,
       thread_id: threadId,
       chat_id: chatId,
+      chat_type: chatType,
+      message_type: messageType,
+      mentions,
     } = receivedMessage;
+    const senderOpenId = sender?.sender_id?.open_id;
+
+    const isAllowedSender =
+      !this._allowedUserOpenIds ||
+      (senderOpenId != null && this._allowedUserOpenIds.has(senderOpenId));
+
+    const mentionEnforced = this._requireMention && chatType === "group";
+    const isBotMentioned =
+      !!this._botOpenId &&
+      !!mentions?.some((m) => m.id?.open_id === this._botOpenId);
+    const mentionOk = !mentionEnforced || isBotMentioned;
+
+    this._logger.info(
+      {
+        message_id: messageId,
+        chat_id: chatId,
+        chat_type: chatType,
+        message_type: messageType,
+        sender_open_id: senderOpenId,
+        bot_mentioned: isBotMentioned,
+        passed: isAllowedSender && mentionOk,
+      },
+      "inbound message",
+    );
+
+    if (!isAllowedSender) {
+      this._logger.info(
+        { message_id: messageId, sender_open_id: senderOpenId },
+        "dropping inbound: sender not in whitelist",
+      );
+      return;
+    }
+    if (!mentionOk) {
+      this._logger.info(
+        { message_id: messageId, chat_id: chatId },
+        "dropping inbound: bot not @mentioned in group chat",
+      );
+      return;
+    }
+
     const session_id = this._resolveSessionId(chatId, threadId);
     const userMessage: UserMessage = {
       id: messageId,

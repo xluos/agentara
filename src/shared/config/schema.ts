@@ -26,9 +26,26 @@ export const TaskingConfig = z.object({
 export interface TaskingConfig extends z.infer<typeof TaskingConfig> {}
 
 /**
- * Key-value parameters for a messaging channel.
+ * Key-value parameters for a messaging channel. Accepts string, boolean,
+ * number, or an array of the same in YAML (e.g. `require_mention: true`,
+ * `allowed_user_ids: [ou_aaa, ou_bbb]`) and normalizes to strings so downstream
+ * consumers always work with a uniform `Record<string, string>` shape. Arrays
+ * are joined with commas — safe for identifiers that never contain commas
+ * (open_id, union_id, etc.).
  */
-export const ChannelParams = z.record(z.string(), z.string());
+export const ChannelParams = z.record(
+  z.string(),
+  z
+    .union([
+      z.string(),
+      z.boolean(),
+      z.number(),
+      z.array(z.union([z.string(), z.boolean(), z.number()])),
+    ])
+    .transform((v) =>
+      Array.isArray(v) ? v.map(String).join(",") : String(v),
+    ),
+);
 export type ChannelParams = z.infer<typeof ChannelParams>;
 
 /**
