@@ -26,16 +26,24 @@ export interface MessageGateway extends EventEmitter<MessageGatewayEventTypes> {
   /**
    * Post a new assistant message without replying to an existing message.
    * @param message - The assistant message to post (without id).
+   * @param options - Optional settings. `channelId` bypasses the session→channel
+   *   DB lookup; use it when the session row may not exist yet (e.g. gateway
+   *   commands that reply before any Session is created).
    * @returns The posted message with id assigned.
    */
-  // eslint-disable-next-line no-unused-vars
-  postMessage(message: Omit<AssistantMessage, "id">): Promise<AssistantMessage>;
+  postMessage(
+    // eslint-disable-next-line no-unused-vars
+    message: Omit<AssistantMessage, "id">,
+    // eslint-disable-next-line no-unused-vars
+    options?: { channelId?: string },
+  ): Promise<AssistantMessage>;
 
   /**
    * Reply to an existing message.
    * @param messageId - ID of the message to reply to.
    * @param message - The assistant message to send (without id).
-   * @param options - Optional settings (e.g. streaming mode).
+   * @param options - Optional settings. `channelId` bypasses the session→channel
+   *   DB lookup; use it when the session row may not exist yet.
    * @returns The sent message with id assigned.
    */
   replyMessage(
@@ -44,18 +52,19 @@ export interface MessageGateway extends EventEmitter<MessageGatewayEventTypes> {
     // eslint-disable-next-line no-unused-vars
     message: Omit<AssistantMessage, "id">,
     // eslint-disable-next-line no-unused-vars
-    options?: { streaming?: boolean },
+    options?: { streaming?: boolean; channelId?: string },
   ): Promise<AssistantMessage>;
 
   /**
    * Update the content of an existing message.
    * @param message - The assistant message with updated content.
-   * @param options - Optional settings (e.g. streaming mode).
+   * @param options - Optional settings. `channelId` bypasses the session→channel
+   *   DB lookup.
    */
   updateMessageContent(
     // eslint-disable-next-line no-unused-vars
     message: AssistantMessage,
     // eslint-disable-next-line no-unused-vars
-    options?: { streaming?: boolean },
+    options?: { streaming?: boolean; channelId?: string },
   ): Promise<void>;
 }

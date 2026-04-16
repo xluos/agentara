@@ -176,11 +176,15 @@ class Kernel {
       );
       replyText = `❌ 命令 \`/${parsed.name}\` 执行失败：${(err as Error).message}`;
     }
-    await this._messageGateway.replyMessage(message.id, {
-      role: "assistant",
-      session_id: message.session_id,
-      content: [{ type: "text", text: replyText }],
-    });
+    await this._messageGateway.replyMessage(
+      message.id,
+      {
+        role: "assistant",
+        session_id: message.session_id,
+        content: [{ type: "text", text: replyText }],
+      },
+      { channelId: message.channel_id, streaming: false },
+    );
     return true;
   };
 
@@ -191,17 +195,25 @@ class Kernel {
 
     if (runningTaskId) {
       await this._taskDispatcher.deleteTask(runningTaskId);
-      await this._messageGateway.replyMessage(message.id, {
-        role: "assistant",
-        session_id: sessionId,
-        content: [{ type: "text", text: "✅ 任务已取消。" }],
-      });
+      await this._messageGateway.replyMessage(
+        message.id,
+        {
+          role: "assistant",
+          session_id: sessionId,
+          content: [{ type: "text", text: "✅ 任务已取消。" }],
+        },
+        { channelId: message.channel_id, streaming: false },
+      );
     } else {
-      await this._messageGateway.replyMessage(message.id, {
-        role: "assistant",
-        session_id: sessionId,
-        content: [{ type: "text", text: "ℹ️  当前 session 没有正在执行的任务。" }],
-      });
+      await this._messageGateway.replyMessage(
+        message.id,
+        {
+          role: "assistant",
+          session_id: sessionId,
+          content: [{ type: "text", text: "ℹ️  当前 session 没有正在执行的任务。" }],
+        },
+        { channelId: message.channel_id, streaming: false },
+      );
     }
   };
 
