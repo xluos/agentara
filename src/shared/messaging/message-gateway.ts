@@ -44,8 +44,12 @@ export interface MessageGateway extends EventEmitter<MessageGatewayEventTypes> {
    * Reply to an existing message.
    * @param messageId - ID of the message to reply to.
    * @param message - The assistant message to send (without id).
-   * @param options - Optional settings. `channelId` bypasses the session→channel
-   *   DB lookup; use it when the session row may not exist yet.
+   * @param options - Optional settings.
+   *   - `channelId` bypasses the session→channel DB lookup; use it when the
+   *     session row may not exist yet.
+   *   - `replyInThread` toggles whether the reply opens a new Feishu topic
+   *     (default `true`, matches the session flow). Pass `false` for one-shot
+   *     replies like slash commands so they show up inline in the chat list.
    * @returns The sent message with id assigned.
    */
   replyMessage(
@@ -54,7 +58,11 @@ export interface MessageGateway extends EventEmitter<MessageGatewayEventTypes> {
     // eslint-disable-next-line no-unused-vars
     message: Omit<AssistantMessage, "id">,
     // eslint-disable-next-line no-unused-vars
-    options?: { streaming?: boolean; channelId?: string },
+    options?: {
+      streaming?: boolean;
+      channelId?: string;
+      replyInThread?: boolean;
+    },
   ): Promise<AssistantMessage>;
 
   /**

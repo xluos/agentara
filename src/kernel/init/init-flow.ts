@@ -345,11 +345,15 @@ export class InitFlow {
     if (!message.channel_id) return;
     const channel = this._feishuChannels.get(message.channel_id);
     if (!channel) return;
-    await channel.replyMessage(message.id, {
-      role: "assistant",
-      session_id: message.session_id,
-      content: [{ type: "text", text }],
-    });
+    await channel.replyMessage(
+      message.id,
+      {
+        role: "assistant",
+        session_id: message.session_id,
+        content: [{ type: "text", text }],
+      },
+      { streaming: false, replyInThread: false },
+    );
   }
 }
 

@@ -153,11 +153,18 @@ class Kernel {
   }
 
   private _handleInboundMessage = async (message: UserMessage) => {
-    // Feishu substitutes @mentions as `@_user_N` placeholders in the text body;
-    // strip them so `@bot /bind foo bar` routes through the slash command path.
-    const text = extractTextContent(message)
-      .replace(/@_user_\d+/g, "")
-      .trim();
+    // Feishu substitutes @mentions as `@_user_N` placeholders. Strip them
+    // ONLY on the first message of a session (the user @-summoning the bot
+    // to start a thread) so that `@bot /bind foo` routes through the slash
+    // command path. Subsequent messages inside the same thread keep their
+    // placeholders intact so real @-mentions of other users aren't mangled.
+    const isSessionStart = !this._sessionManager.existsSession(
+      message.session_id,
+    );
+    const rawText = extractTextContent(message);
+    const text = isSessionStart
+      ? rawText.replace(/@_user_\d+/g, "").trim()
+      : rawText.trim();
 
     // Handle /stop command (kernel-owned because it talks to TaskDispatcher)
     if (text === "/stop") {
@@ -216,7 +223,11 @@ class Kernel {
         session_id: message.session_id,
         content: [{ type: "text", text: replyText }],
       },
-      { channelId: message.channel_id, streaming: false },
+      {
+        channelId: message.channel_id,
+        streaming: false,
+        replyInThread: false,
+      },
     );
     return true;
   };
@@ -235,7 +246,11 @@ class Kernel {
           session_id: sessionId,
           content: [{ type: "text", text: "✅ 任务已取消。" }],
         },
-        { channelId: message.channel_id, streaming: false },
+        {
+          channelId: message.channel_id,
+          streaming: false,
+          replyInThread: false,
+        },
       );
     } else {
       await this._messageGateway.replyMessage(
@@ -245,7 +260,11 @@ class Kernel {
           session_id: sessionId,
           content: [{ type: "text", text: "ℹ️  当前 session 没有正在执行的任务。" }],
         },
-        { channelId: message.channel_id, streaming: false },
+        {
+          channelId: message.channel_id,
+          streaming: false,
+          replyInThread: false,
+        },
       );
     }
   };

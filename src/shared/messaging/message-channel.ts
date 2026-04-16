@@ -64,7 +64,11 @@ export interface MessageChannel extends EventEmitter {
    * Reply to an existing message.
    * @param messageId - ID of the message to reply to.
    * @param message - The assistant message to send (without id).
-   * @param options - Optional settings (e.g. streaming mode).
+   * @param options - Optional settings.
+   *   - `streaming`: card is part of a stream; skip text rendering until final.
+   *   - `replyInThread`: Feishu-specific — default `true`. Set `false` for
+   *     one-shot replies (e.g. slash commands) that should appear inline in
+   *     the chat instead of opening a new topic.
    * @returns The sent message with id assigned.
    */
   replyMessage(
@@ -73,7 +77,7 @@ export interface MessageChannel extends EventEmitter {
     // eslint-disable-next-line no-unused-vars
     message: Omit<AssistantMessage, "id">,
     // eslint-disable-next-line no-unused-vars
-    options?: { streaming?: boolean },
+    options?: { streaming?: boolean; replyInThread?: boolean },
   ): Promise<AssistantMessage>;
 
   /**

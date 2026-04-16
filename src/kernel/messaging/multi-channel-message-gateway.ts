@@ -95,7 +95,11 @@ export class MultiChannelMessageGateway
   async replyMessage(
     messageId: string,
     message: Omit<AssistantMessage, "id">,
-    options?: { streaming?: boolean; channelId?: string },
+    options?: {
+      streaming?: boolean;
+      channelId?: string;
+      replyInThread?: boolean;
+    },
   ): Promise<AssistantMessage> {
     const channel = this._resolveChannelFor(message.session_id, options?.channelId);
     const result = await channel.replyMessage(messageId, message, options);

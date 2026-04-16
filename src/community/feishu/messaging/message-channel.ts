@@ -175,11 +175,15 @@ export class FeishuMessageChannel
    * commands that render custom cards (e.g. `/init`) outside the normal
    * AssistantMessage pipeline. Returns the posted message's id so the caller
    * can correlate later card actions / updates.
+   *
+   * `options.replyInThread` defaults to `false`: command-originated cards
+   * should appear inline in the chat rather than opening a new topic. Pass
+   * `true` explicitly if the flow is session-scoped.
    */
   async sendRawCard(
     chatId: string,
     card: Card,
-    options: { replyTo?: string } = {},
+    options: { replyTo?: string; replyInThread?: boolean } = {},
   ): Promise<string> {
     if (options.replyTo) {
       const { data } = await this._client.im.message.reply({
@@ -187,7 +191,7 @@ export class FeishuMessageChannel
         data: {
           msg_type: "interactive",
           content: JSON.stringify(card),
-          reply_in_thread: true,
+          reply_in_thread: options.replyInThread ?? false,
         },
       });
       if (!data?.message_id) {
@@ -316,11 +320,23 @@ export class FeishuMessageChannel
     return result;
   }
 
-  /** Reply to a message in a Feishu chat thread. */
+  /**
+   * Reply to a message. Defaults to opening a new Feishu topic
+   * (`reply_in_thread: true`) because most replies are session-scoped
+   * assistant output. Pass `replyInThread: false` for one-shot replies (slash
+   * commands, quick error messages) that should render inline instead.
+   *
+   * When `replyInThread` is false, the thread→session mapping is skipped —
+   * there's no new thread to map, and the reply doesn't belong to any
+   * session anyway.
+   */
   async replyMessage(
     messageId: string,
     message: Omit<AssistantMessage, "id">,
-    { streaming = true }: { streaming?: boolean } = {},
+    {
+      streaming = true,
+      replyInThread = true,
+    }: { streaming?: boolean; replyInThread?: boolean } = {},
   ): Promise<AssistantMessage> {
     const { firstMessageContent, remainingChunks } = this._prepareMessageContent(
       message.content,
@@ -341,18 +357,25 @@ export class FeishuMessageChannel
       data: {
         msg_type: "interactive",
         content: JSON.stringify(card),
-        reply_in_thread: true,
+        reply_in_thread: replyInThread,
       },
     });
     if (!replyMessage) {
       throw new Error("Failed to reply message");
     }
 
-    const { thread_id: threadId } = replyMessage;
-    const sessionId = message.session_id;
-    this._mapThreadToSession(threadId!, sessionId);
+    if (replyInThread) {
+      const { thread_id: threadId } = replyMessage;
+      if (threadId) {
+        this._mapThreadToSession(threadId, message.session_id);
+      }
+    }
 
-    await this._sendRemainingChunks(replyMessage.message_id!, remainingChunks);
+    await this._sendRemainingChunks(
+      replyMessage.message_id!,
+      remainingChunks,
+      replyInThread,
+    );
 
     const assistantMessage = message as AssistantMessage;
     assistantMessage.id = replyMessage.message_id!;
@@ -659,6 +682,7 @@ export class FeishuMessageChannel
   private async _sendRemainingChunks(
     messageId: string,
     chunks: string[],
+    replyInThread = true,
   ): Promise<void> {
     for (const chunkText of chunks) {
       const chunkCard = await renderMessageCard(
@@ -675,7 +699,7 @@ export class FeishuMessageChannel
         data: {
           msg_type: "interactive",
           content: JSON.stringify(chunkCard),
-          reply_in_thread: true,
+          reply_in_thread: replyInThread,
         },
       });
     }
