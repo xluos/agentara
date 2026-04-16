@@ -18,6 +18,18 @@ export function resolveDailyLogFilePath(date: Date) {
   return join(logs, `${dateString}.md`);
 }
 
+/**
+ * Runtime log files written alongside stdout by pino. One file per day,
+ * `YYYY-MM-DD.log`. Conceptually distinct from `memory/logs/` (which stores
+ * structured agent diaries); these are operational logs for debugging the
+ * agentara process itself.
+ */
+export const runtime_logs = join(home, "runtime-logs");
+export function resolveRuntimeLogFilePath(date: Date) {
+  const dateString = dayjs(date).format("YYYY-MM-DD");
+  return join(runtime_logs, `${dateString}.log`);
+}
+
 export const workspace = join(home, "workspace");
 export const projects = join(workspace, "projects");
 export const uploads = join(workspace, "uploads");
