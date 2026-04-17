@@ -129,6 +129,7 @@ export interface CheckerElement extends BaseElement<"checker"> {
   name: string;
   text: PlainTextElement;
   checked?: boolean;
+  disabled?: boolean;
 }
 
 export interface SelectOption {

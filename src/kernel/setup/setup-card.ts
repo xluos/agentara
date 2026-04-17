@@ -23,6 +23,26 @@ export const SETUP_FIELD = {
 } as const;
 
 /**
+ * Per-repo pre-fill state for re-runs of `/setup`. When a repo is already
+ * cloned in the workspace we surface it on the card as `checked: true` +
+ * `disabled: true` so the user cannot uncheck it, and pre-fill the branch
+ * input with the repo's current HEAD so editing = branch switch on submit.
+ */
+export interface RepoPrefill {
+  /** Repo is already cloned → checker is forced on and disabled. */
+  already_cloned: boolean;
+  /** Branch to pre-fill in the input (current HEAD for existing repos). */
+  current_branch?: string;
+}
+
+export interface SetupCardOptions {
+  /** Keyed by repo name. Missing entries render as unchecked + editable. */
+  prefills?: Record<string, RepoPrefill>;
+  /** Primary repo to preselect in the bottom dropdown (usually current active_repo). */
+  primary_repo?: string;
+}
+
+/**
  * Build the interactive `/setup` card.
  *
  * Layout:
@@ -33,17 +53,26 @@ export const SETUP_FIELD = {
  *   server receives `action.name = "setup_submit"` and `action.form_value`
  *   carries the checker + input + select values.
  *
+ * Re-runs pass `options.prefills` so already-cloned repos render as
+ * locked-on checkers with their current branch pre-filled; new catalog
+ * entries render as unchecked and can be picked to be added.
+ *
  * Card-to-pending correlation happens on the kernel side via `message_id`,
  * so the card itself carries no setup_id.
  */
-export function buildSetupCard(catalog: PredefinedRepo[]): Card {
+export function buildSetupCard(
+  catalog: PredefinedRepo[],
+  options: SetupCardOptions = {},
+): Card {
   const formElements: Element[] = [];
+  const prefills = options.prefills ?? {};
+  const hasExisting = Object.values(prefills).some((p) => p.already_cloned);
 
   for (const repo of catalog) {
-    formElements.push(_buildRepoRow(repo));
+    formElements.push(_buildRepoRow(repo, prefills[repo.name]));
   }
 
-  formElements.push(_buildPrimarySelect(catalog));
+  formElements.push(_buildPrimarySelect(catalog, options.primary_repo));
   formElements.push(_buildSubmitButton());
 
   const form: FormElement = {
@@ -52,14 +81,22 @@ export function buildSetupCard(catalog: PredefinedRepo[]): Card {
     elements: formElements,
   };
 
+  const headerLines = hasExisting
+    ? [
+        "**📦 更新当前群的 workspace**",
+        "",
+        "已绑定的仓库保持勾选（不可取消）。可以修改其分支，或勾选新仓库加入。",
+        "底部「主仓库」可切换后续消息默认使用的仓库。",
+      ]
+    : [
+        "**📦 初始化当前群的 workspace**",
+        "",
+        "勾选要克隆的仓库；分支默认 `master`，留空即使用 master。",
+        "选多个仓库时，请在底部选一个作为「主仓库」（后续消息的默认仓库）。",
+      ];
   const header: MarkdownElement = {
     tag: "markdown",
-    content: [
-      "**📦 初始化当前群的 workspace**",
-      "",
-      "勾选要克隆的仓库；分支默认 `master`，留空即使用 master。",
-      "选多个仓库时，请在底部选一个作为「主仓库」（后续消息的默认仓库）。",
-    ].join("\n"),
+    content: headerLines.join("\n"),
   };
 
   return {
@@ -68,7 +105,9 @@ export function buildSetupCard(catalog: PredefinedRepo[]): Card {
       streaming_mode: false,
       update_multi: true,
       width_mode: "fill",
-      summary: { content: "📦 初始化 workspace" },
+      summary: {
+        content: hasExisting ? "📦 更新 workspace" : "📦 初始化 workspace",
+      },
     },
     body: {
       elements: [header, form],
@@ -76,23 +115,32 @@ export function buildSetupCard(catalog: PredefinedRepo[]): Card {
   };
 }
 
-function _buildRepoRow(repo: PredefinedRepo): ColumnSetElement {
+function _buildRepoRow(
+  repo: PredefinedRepo,
+  prefill?: RepoPrefill,
+): ColumnSetElement {
   // NOTE: Feishu's checker.text ONLY accepts `plain_text`, not `markdown`.
   // Attempting markdown yields "type of element is not supported tag: markdown"
   // (error 200621). We inline the description into the label as a plain string.
   const label = repo.description
     ? `${repo.name} — ${repo.description}`
     : repo.name;
+  const alreadyCloned = prefill?.already_cloned === true;
   const checker: CheckerElement = {
     tag: "checker",
     name: SETUP_FIELD.repoChecker(repo.name),
     text: { tag: "plain_text", content: label },
-    checked: false,
+    checked: alreadyCloned,
+    // Already-cloned repos are locked on so the user can't accidentally drop
+    // an existing binding. New catalog entries stay fully editable.
+    disabled: alreadyCloned,
   };
   const branchInput: InputElement = {
     tag: "input",
     name: SETUP_FIELD.branchInput(repo.name),
     placeholder: { tag: "plain_text", content: "master" },
+    // Pre-fill with the repo's current branch so editing this field = switch.
+    default_value: prefill?.current_branch,
     width: "fill",
   };
 
@@ -107,12 +155,19 @@ function _buildRepoRow(repo: PredefinedRepo): ColumnSetElement {
   };
 }
 
-function _buildPrimarySelect(catalog: PredefinedRepo[]): SelectStaticElement {
+function _buildPrimarySelect(
+  catalog: PredefinedRepo[],
+  preselected?: string,
+): SelectStaticElement {
+  const initial =
+    preselected && catalog.some((r) => r.name === preselected)
+      ? preselected
+      : catalog[0]?.name;
   return {
     tag: "select_static",
     name: SETUP_FIELD.primaryRepo,
     placeholder: { tag: "plain_text", content: "选择主仓库（默认第一个）" },
-    initial_option: catalog[0]?.name,
+    initial_option: initial,
     options: catalog.map((r) => ({
       text: { tag: "plain_text", content: r.name },
       value: r.name,

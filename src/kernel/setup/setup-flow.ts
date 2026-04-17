@@ -18,6 +18,7 @@ import {
   buildSetupCard,
   buildSetupResultCard,
   SETUP_FIELD,
+  type RepoPrefill,
 } from "./setup-card";
 
 /**
@@ -29,6 +30,12 @@ interface PendingSetup {
   chat_id: string;
   initiator_open_id: string;
   catalog_snapshot: PredefinedRepo[];
+  /**
+   * Repo names that were already cloned when the card was rendered.
+   * Their checkers are disabled on the card, so form submissions may not
+   * echo their checked state back — we force-include them on submit.
+   */
+  locked_repos: Set<string>;
   created_at: number;
 }
 
@@ -77,8 +84,10 @@ export class SetupFlow {
 
   /**
    * Entry point invoked from `kernel._handleInboundMessage` when the inbound
-   * text is `/setup`. Sends back either a plain-text error (no catalog,
-   * already bound, ...) or the interactive card.
+   * text is `/setup`. Re-runnable: on a second invocation the card renders
+   * already-cloned repos as locked checkers with their current branches
+   * pre-filled, so the user can add new repos or switch branches without
+   * being able to accidentally drop existing ones.
    */
   async start(message: UserMessage): Promise<void> {
     const chatId = message.chat_id;
@@ -94,23 +103,24 @@ export class SetupFlow {
       );
       return;
     }
-    const existing = this._workspaceStore.getBinding(chatId);
-    if (existing) {
-      const repo = existing.active_repo ?? "(未设置)";
-      const branch = existing.active_branch ?? "(未设置)";
-      await this._replyText(
-        message,
-        `❌ 当前群已绑定 \`${repo}\` @ \`${branch}\`，请先 \`/unbind\`。`,
-      );
-      return;
-    }
     const channel = this._feishuChannels.get(message.channel_id);
     if (!channel) {
       await this._replyText(message, "❌ 无法找到对应的飞书 channel。");
       return;
     }
 
-    const card = buildSetupCard(catalog);
+    // Re-runs are allowed. Ensure the binding row + workspace dir exist so
+    // we can inspect what's already cloned and pre-fill the card accordingly.
+    const binding = this._workspaceStore.upsertBinding(chatId, {});
+    const { prefills, lockedRepos } = this._buildPrefills(
+      binding.workspace_path,
+      catalog,
+    );
+
+    const card = buildSetupCard(catalog, {
+      prefills,
+      primary_repo: binding.active_repo ?? undefined,
+    });
     const cardMessageId = await channel.sendRawCard(chatId, card, {
       replyTo: message.id,
     });
@@ -118,6 +128,7 @@ export class SetupFlow {
       chat_id: chatId,
       initiator_open_id: message.sender_open_id ?? "",
       catalog_snapshot: catalog,
+      locked_repos: lockedRepos,
       created_at: Date.now(),
     });
     this._logger.info(
@@ -172,6 +183,7 @@ export class SetupFlow {
     const selections = this._parseFormValue(
       payload.form_value,
       pending.catalog_snapshot,
+      pending.locked_repos,
     );
     if (selections.length === 0) {
       await this._tryUpdateCard(
@@ -279,12 +291,17 @@ export class SetupFlow {
   private _parseFormValue(
     formValue: Record<string, unknown>,
     catalog: PredefinedRepo[],
+    lockedRepos: Set<string>,
   ): Array<{ repo: PredefinedRepo; name: string; branch: string }> {
     const out: Array<{ repo: PredefinedRepo; name: string; branch: string }> =
       [];
     for (const repo of catalog) {
       const rawChecked = formValue[SETUP_FIELD.repoChecker(repo.name)];
-      if (!_isTruthyChecker(rawChecked)) continue;
+      // Locked repos are rendered with disabled checkers — some Feishu
+      // clients don't echo disabled values back, so force-include them.
+      const isSelected =
+        lockedRepos.has(repo.name) || _isTruthyChecker(rawChecked);
+      if (!isSelected) continue;
       const rawBranch = formValue[SETUP_FIELD.branchInput(repo.name)];
       const branch =
         typeof rawBranch === "string" && rawBranch.trim()
@@ -293,6 +310,31 @@ export class SetupFlow {
       out.push({ repo, name: repo.name, branch });
     }
     return out;
+  }
+
+  /**
+   * Compute per-repo pre-fill state for the card: which catalog repos are
+   * already cloned in this workspace and what branch each is currently on.
+   * The set of locked repo names is tracked so the submit handler can
+   * force-include them even if the card's disabled checker swallows the
+   * checked state.
+   */
+  private _buildPrefills(
+    workspacePath: string,
+    catalog: PredefinedRepo[],
+  ): { prefills: Record<string, RepoPrefill>; lockedRepos: Set<string> } {
+    const prefills: Record<string, RepoPrefill> = {};
+    const lockedRepos = new Set<string>();
+    for (const repo of catalog) {
+      const repoPath = join(workspacePath, repo.name);
+      if (!existsSync(join(repoPath, ".git"))) continue;
+      lockedRepos.add(repo.name);
+      prefills[repo.name] = {
+        already_cloned: true,
+        current_branch: _readCurrentBranch(repoPath),
+      };
+    }
+    return { prefills, lockedRepos };
   }
 
   private async _cloneAndCheckout(
@@ -418,6 +460,20 @@ function _summarizeFeishuError(
     msg: candidate.response?.data?.msg ?? candidate.message,
     status: candidate.response?.status,
   };
+}
+
+function _readCurrentBranch(repoPath: string): string | undefined {
+  try {
+    const proc = Bun.spawnSync(
+      ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+      { cwd: repoPath, stdout: "pipe", stderr: "pipe" },
+    );
+    if (proc.exitCode !== 0) return undefined;
+    const out = proc.stdout.toString().trim();
+    return out && out !== "HEAD" ? out : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 async function _execGit(
