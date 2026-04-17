@@ -8,9 +8,15 @@ import type {
   Element,
   FormElement,
   InputElement,
-  MarkdownElement,
   SelectStaticElement,
 } from "../../community/feishu/messaging/types";
+
+import {
+  buildCardIntro,
+  buildMarkdown,
+  buildResultCard,
+  buildSectionPanel,
+} from "./card-ui";
 
 /**
  * Field naming convention used by both the card renderer and the submit
@@ -54,38 +60,41 @@ export interface SetupCardOptions {
 /**
  * Build the interactive `/setup` card.
  *
- * Layout:
- * - Header: prompt text
- * - Form body: one row per predefined repo (checker + branch input + description)
- * - Primary-repo selector (always shown; default = first repo in catalog)
- * - Submit button ("初始化") with `action_type: "form_submit"`. On submit the
- *   server receives `action.name = "setup_submit"` and `action.form_value`
- *   carries the checker + input + select values.
- *
- * Re-runs pass `options.prefills` so already-cloned repos render as
- * locked-on checkers with their current branch pre-filled; new catalog
- * entries render as unchecked and can be picked to be added.
- *
- * Card-to-pending correlation happens on the kernel side via `message_id`,
- * so the card itself carries no setup_id.
+ * Compared with the original plain-markdown card, this version adds:
+ * - a proper card head so the action is recognizable in chat history
+ * - a collapsible "how it works" section
+ * - a current-state summary when editing an existing workspace
+ * - clearer per-repo rows (name/description/status separated from branch input)
  */
 export function buildSetupCard(
   catalog: PredefinedRepo[],
   options: SetupCardOptions = {},
 ): Card {
-  const formElements: Element[] = [];
   const prefills = options.prefills ?? {};
   const hasExisting = Object.values(prefills).some((p) => p.already_cloned);
+  const lockedRepos = catalog
+    .filter((repo) => prefills[repo.name]?.already_cloned)
+    .map((repo) => repo.name);
+
+  const formElements: Element[] = [];
 
   if (options.workspace_name) {
     formElements.push(..._buildWorkspaceNameInput(options.workspace_name));
   }
+
+  formElements.push(
+    buildMarkdown("**仓库与分支**"),
+  );
+
   for (const repo of catalog) {
     formElements.push(_buildRepoRow(repo, prefills[repo.name]));
   }
 
+  formElements.push(
+    buildMarkdown("**主仓库**"),
+  );
   formElements.push(_buildPrimarySelect(catalog, options.primary_repo));
-  formElements.push(_buildSubmitButton());
+  formElements.push(_buildSubmitButton(hasExisting));
 
   const form: FormElement = {
     tag: "form",
@@ -93,23 +102,31 @@ export function buildSetupCard(
     elements: formElements,
   };
 
-  const headerLines = hasExisting
-    ? [
-        "**📦 更新当前群的 workspace**",
-        "",
-        "已绑定的仓库保持勾选（不可取消）。可以修改其分支，或勾选新仓库加入。",
-        "底部「主仓库」可切换后续消息默认使用的仓库。",
-      ]
-    : [
-        "**📦 初始化当前群的 workspace**",
-        "",
-        "勾选要克隆的仓库；分支默认 `master`，留空即使用 master。",
-        "选多个仓库时，请在底部选一个作为「主仓库」（后续消息的默认仓库）。",
-      ];
-  const header: MarkdownElement = {
-    tag: "markdown",
-    content: headerLines.join("\n"),
-  };
+  const bodyElements: Element[] = [
+    buildCardIntro({
+      title: hasExisting ? "更新 Workspace" : "初始化 Workspace",
+    }),
+  ];
+
+  if (hasExisting) {
+    const currentSummaryLines = [
+      `- 已纳管仓库：${lockedRepos.map((name) => `\`${name}\``).join("、") || "（暂无）"}`,
+      `- 当前主仓库：\`${options.primary_repo ?? "（未设置）"}\``,
+    ];
+    if (options.workspace_name?.id) {
+      currentSummaryLines.push(`- Workspace ID：\`${options.workspace_name.id}\``);
+    }
+    bodyElements.push(
+      buildSectionPanel({
+        title: "当前状态",
+        expanded: true,
+        tone: "neutral",
+        elements: [buildMarkdown(currentSummaryLines.join("\n"))],
+      }),
+    );
+  }
+
+  bodyElements.push(form);
 
   return {
     schema: "2.0",
@@ -122,7 +139,9 @@ export function buildSetupCard(
       },
     },
     body: {
-      elements: [header, form],
+      padding: "12px 16px 16px 16px",
+      vertical_spacing: "12px",
+      elements: bodyElements,
     },
   };
 }
@@ -130,13 +149,6 @@ export function buildSetupCard(
 function _buildWorkspaceNameInput(
   state: NonNullable<SetupCardOptions["workspace_name"]>,
 ): Element[] {
-  // Stack label + input vertically so narrow cards (mobile) don't squeeze
-  // the label into a sliver. The stable id sits on its own line as a small
-  // annotation below the input; on first run it's omitted entirely.
-  const label: MarkdownElement = {
-    tag: "markdown",
-    content: "**Workspace 名称**",
-  };
   const input: InputElement = {
     tag: "input",
     name: SETUP_FIELD.workspaceName,
@@ -144,13 +156,20 @@ function _buildWorkspaceNameInput(
     default_value: state.value,
     width: "fill",
   };
-  const elements: Element[] = [label, input];
+
+  const elements: Element[] = [
+    buildMarkdown("**Workspace 名称**"),
+    input,
+  ];
+
   if (state.id) {
-    elements.push({
-      tag: "markdown",
-      content: `<font color='grey'>当前 ID \`${state.id}\`</font>`,
-    });
+    elements.push(
+      buildMarkdown(`<font color='grey'>当前 Workspace ID：\`${state.id}\`</font>`, {
+        text_size: "notation",
+      }),
+    );
   }
+
   return elements;
 }
 
@@ -158,27 +177,18 @@ function _buildRepoRow(
   repo: PredefinedRepo,
   prefill?: RepoPrefill,
 ): ColumnSetElement {
-  // NOTE: Feishu's checker.text ONLY accepts `plain_text`, not `markdown`.
-  // Attempting markdown yields "type of element is not supported tag: markdown"
-  // (error 200621). We inline the description into the label as a plain string.
-  const label = repo.description
-    ? `${repo.name} — ${repo.description}`
-    : repo.name;
   const alreadyCloned = prefill?.already_cloned === true;
   const checker: CheckerElement = {
     tag: "checker",
     name: SETUP_FIELD.repoChecker(repo.name),
-    text: { tag: "plain_text", content: label },
+    text: { tag: "plain_text", content: repo.name },
     checked: alreadyCloned,
-    // Already-cloned repos are locked on so the user can't accidentally drop
-    // an existing binding. New catalog entries stay fully editable.
     disabled: alreadyCloned,
   };
   const branchInput: InputElement = {
     tag: "input",
     name: SETUP_FIELD.branchInput(repo.name),
     placeholder: { tag: "plain_text", content: "master" },
-    // Pre-fill with the repo's current branch so editing this field = switch.
     default_value: prefill?.current_branch,
     width: "fill",
   };
@@ -186,10 +196,40 @@ function _buildRepoRow(
   return {
     tag: "column_set",
     flex_mode: "stretch",
-    horizontal_spacing: "8px",
+    horizontal_spacing: "12px",
     columns: [
-      { tag: "column", width: "weighted", weight: 1, elements: [checker] },
-      { tag: "column", width: "140px", elements: [branchInput] },
+      {
+        tag: "column",
+        width: "weighted",
+        weight: 1,
+        elements: [
+          checker,
+          ...(repo.description
+            ? [
+                buildMarkdown(
+                  `<font color='grey'>${repo.description}</font>`,
+                  { text_size: "notation" },
+                ),
+              ]
+            : []),
+          ...(alreadyCloned
+            ? [
+                buildMarkdown(
+                  "<font color='green'>已存在于当前 workspace，可直接修改分支。</font>",
+                  { text_size: "notation" },
+                ),
+              ]
+            : []),
+        ],
+      },
+      {
+        tag: "column",
+        width: "160px",
+        elements: [
+          buildMarkdown("<font color='grey'>分支</font>", { text_size: "notation" }),
+          branchInput,
+        ],
+      },
     ],
   };
 }
@@ -215,22 +255,17 @@ function _buildPrimarySelect(
   };
 }
 
-function _buildSubmitButton(): ButtonElement {
-  // IMPORTANT: use `action_type: "form_submit"` alone — do NOT combine with
-  // `behaviors: [{ type: "callback", ... }]`. Feishu's validator requires at
-  // least one recognizable submit button inside a form container, and a
-  // `callback` behavior makes the button look like a plain callback button
-  // instead, producing "there is no submit button in the form container".
-  //
-  // The setup flow correlates the submit event by `message_id` (we keep
-  // pending state keyed by the card's message id), so the button does not
-  // need to carry setup_id itself.
+function _buildSubmitButton(hasExisting: boolean): ButtonElement {
   return {
     tag: "button",
     name: "setup_submit",
-    text: { tag: "plain_text", content: "提交" },
+    text: {
+      tag: "plain_text",
+      content: hasExisting ? "保存并更新" : "开始初始化",
+    },
     type: "primary",
     action_type: "form_submit",
+    width: "fill",
   };
 }
 
@@ -242,26 +277,9 @@ export function buildSetupResultCard(
   summary: string,
   perRepoLines: string[],
 ): Card {
-  const elements: Element[] = [
-    {
-      tag: "markdown",
-      content: summary,
-    },
-  ];
-  if (perRepoLines.length > 0) {
-    elements.push({
-      tag: "markdown",
-      content: perRepoLines.join("\n"),
-    });
-  }
-  return {
-    schema: "2.0",
-    config: {
-      streaming_mode: false,
-      update_multi: true,
-      width_mode: "fill",
-      summary: { content: summary.slice(0, 80) },
-    },
-    body: { elements },
-  };
+  return buildResultCard({
+    title: "Workspace 处理结果",
+    summary,
+    detail: perRepoLines,
+  });
 }

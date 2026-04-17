@@ -5,9 +5,15 @@ import type {
   Card,
   Element,
   FormElement,
-  MarkdownElement,
   SelectStaticElement,
 } from "../../community/feishu/messaging/types";
+
+import {
+  buildCardIntro,
+  buildMarkdown,
+  buildResultCard,
+  buildSectionPanel,
+} from "./card-ui";
 
 /**
  * Shared field names used by both the card renderer and the submit handler.
@@ -44,49 +50,50 @@ export interface SwitchCardOptions {
 }
 
 /**
- * Build the `/switch` card.
- *
- * Layout:
- * - Header
- * - Current-binding summary (markdown) — omitted when chat has no binding
- * - Form body:
- *   - select_static with one option per workspace + a trailing "detach" option
- *   - Submit button ("切换")
- *
- * Pending correlation happens on the kernel side via `message_id`, so the
- * card carries no id of its own.
+ * Build the `/switch` card with a richer structure than the old plain
+ * markdown version: card head, current-binding summary, and a clearer form
+ * section that explains the detach option.
  */
 export function buildSwitchCard(options: SwitchCardOptions): Card {
   const { workspaces, current } = options;
 
-  const header: MarkdownElement = {
-    tag: "markdown",
-    content: [
-      "**🔀 切换当前会话的 workspace**",
-      "",
-      "从下面的列表里挑一个已有 workspace；选「取消绑定」则回到默认 workspace。",
-    ].join("\n"),
-  };
-
-  const body: Element[] = [header];
+  const body: Element[] = [
+    buildCardIntro({
+      title: "切换 Workspace",
+    }),
+  ];
 
   if (current) {
-    body.push({
-      tag: "markdown",
-      content: [
-        "**当前绑定：**",
-        `- 名称：\`${current.workspace_name}\``,
-        `- ID：\`${current.workspace_id}\``,
-        `- 活跃仓库：\`${current.active_repo ?? "(未设置)"}\``,
-        `- 活跃分支：\`${current.active_branch ?? "(未设置)"}\``,
-      ].join("\n"),
-    });
+    body.push(
+      buildSectionPanel({
+        title: "当前绑定",
+        expanded: true,
+        tone: "neutral",
+        elements: [
+          buildMarkdown(
+            [
+              `- 名称：\`${current.workspace_name}\``,
+              `- ID：\`${current.workspace_id}\``,
+              `- 活跃仓库：\`${current.active_repo ?? "(未设置)"}\``,
+              `- 活跃分支：\`${current.active_branch ?? "(未设置)"}\``,
+            ].join("\n"),
+          ),
+        ],
+      }),
+    );
   } else {
-    body.push({
-      tag: "markdown",
-      content:
-        "_当前会话还没有绑定任何 workspace，正在使用默认 workspace。_",
-    });
+    body.push(
+      buildSectionPanel({
+        title: "当前绑定",
+        expanded: true,
+        tone: "neutral",
+        elements: [
+          buildMarkdown(
+            "_当前会话还没有绑定任何 workspace，正在使用默认 workspace。_",
+          ),
+        ],
+      }),
+    );
   }
 
   const select = _buildWorkspaceSelect(workspaces, current?.workspace_id);
@@ -94,7 +101,11 @@ export function buildSwitchCard(options: SwitchCardOptions): Card {
   const form: FormElement = {
     tag: "form",
     name: "switch_form",
-    elements: [select, submit],
+    elements: [
+      buildMarkdown("**目标 Workspace**"),
+      select,
+      submit,
+    ],
   };
   body.push(form);
 
@@ -106,7 +117,11 @@ export function buildSwitchCard(options: SwitchCardOptions): Card {
       width_mode: "fill",
       summary: { content: "🔀 切换 workspace" },
     },
-    body: { elements: body },
+    body: {
+      padding: "12px 16px 16px 16px",
+      vertical_spacing: "12px",
+      elements: body,
+    },
   };
 }
 
@@ -115,32 +130,17 @@ export function buildSwitchCard(options: SwitchCardOptions): Card {
  * original card in place via `updateRawCard`.
  */
 export function buildSwitchResultCard(summary: string, detail: string[] = []): Card {
-  const elements: Element[] = [
-    { tag: "markdown", content: summary },
-  ];
-  if (detail.length > 0) {
-    elements.push({ tag: "markdown", content: detail.join("\n") });
-  }
-  return {
-    schema: "2.0",
-    config: {
-      streaming_mode: false,
-      update_multi: true,
-      width_mode: "fill",
-      summary: { content: summary.slice(0, 80) },
-    },
-    body: { elements },
-  };
+  return buildResultCard({
+    title: "Workspace 切换结果",
+    summary,
+    detail,
+  });
 }
 
 function _buildWorkspaceSelect(
   workspaces: Workspace[],
   preselected?: string,
 ): SelectStaticElement {
-  // Feishu's select_static has no "empty" state — when there are no
-  // workspaces we still render a single disabled-feeling placeholder option
-  // so the card is valid. Callers should prefer to skip the card entirely in
-  // that case, but we don't want the renderer to throw either way.
   const options = workspaces.map((ws) => ({
     text: {
       tag: "plain_text" as const,
@@ -172,15 +172,12 @@ function _buildWorkspaceSelect(
 }
 
 function _buildSubmitButton(): ButtonElement {
-  // Uses `action_type: "form_submit"` — Feishu's form container needs at
-  // least one submit-type button; mixing `behaviors: [{type:"callback"}]`
-  // here would cause the container to reject the button as non-submit
-  // ("there is no submit button in the form container").
   return {
     tag: "button",
     name: "switch_submit",
-    text: { tag: "plain_text", content: "✅ 切换" },
+    text: { tag: "plain_text", content: "确认切换" },
     type: "primary",
     action_type: "form_submit",
+    width: "fill",
   };
 }
