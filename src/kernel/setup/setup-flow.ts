@@ -281,8 +281,6 @@ export class SetupFlow {
     const lines = [
       `- Workspace ID: \`${binding.workspace_id}\``,
       `- Workspace 名称: \`${binding.workspace_name}\``,
-      `- Workspace 路径: \`${binding.workspace_path}\``,
-      "- 其他群可用 `/bind <workspace-id>` 复用这个空间。",
       ...results.map(_formatResultLine),
     ];
     const summary = activeRepo && activeBranch

@@ -8,7 +8,12 @@ import {
   type RepoSyncResult,
 } from "@/kernel/workspaces";
 
-import type { CommandContext, CommandHandler } from "./types";
+import { buildCommandCard } from "./cards";
+import type {
+  CardCommandResult,
+  CommandContext,
+  CommandHandler,
+} from "./types";
 
 /**
  * Non-LLM commands that run inside `_handleInboundMessage` before the
@@ -60,6 +65,26 @@ async function execGit(
   return { ok: code === 0, stdout: stdout.trim(), stderr: stderr.trim(), code };
 }
 
+function cardReply(
+  title: string,
+  lines: string[],
+  options?: {
+    sections?: Array<{ title: string; lines: string[]; expanded?: boolean }>;
+    summary?: string;
+  },
+): CardCommandResult {
+  return {
+    kind: "card",
+    card: buildCommandCard({
+      title,
+      lines,
+      sections: options?.sections,
+      summary: options?.summary,
+    }),
+    fallback_text: [title, ...lines].join("\n"),
+  };
+}
+
 const bindHandler: CommandHandler = {
   name: "bind",
   description: "/bind [workspace-id] — 绑定当前群到一个 workspace；传 id 时复用已有空间",
@@ -91,13 +116,12 @@ const bindHandler: CommandHandler = {
         ? `- 活跃仓库：\`${binding.active_repo}${
             binding.active_branch ? " " + binding.active_branch : ""
           }\``
-        : "- 活跃仓库：(未设置，可用 `/setup` 配置)";
-      return [
-        `✅ 当前群已绑定到已有 workspace：\`${binding.workspace_name}\``,
+        : "- 活跃仓库：(未设置)";
+      return cardReply("绑定 Workspace", [
+        `✅ 当前群已绑定到 \`${binding.workspace_name}\``,
         `- Workspace ID：\`${binding.workspace_id}\``,
-        `- 路径：\`${binding.workspace_path}\``,
         activeLine,
-      ].join("\n");
+      ]);
     }
     const existing = ctx.workspaceStore.getBinding(chatId);
     // Empty patch: just ensure the binding row + workspace dir exist; don't
@@ -105,20 +129,16 @@ const bindHandler: CommandHandler = {
     const binding = ctx.workspaceStore.upsertBinding(chatId, {});
     ctx.logger.info({ chat_id: chatId, binding }, "group binding ensured");
     if (existing) {
-      return [
-        `ℹ️  当前群已绑定 workspace：\`${binding.workspace_name}\``,
+      return cardReply("绑定 Workspace", [
+        `ℹ️  当前群已绑定 \`${binding.workspace_name}\``,
         `- Workspace ID：\`${binding.workspace_id}\``,
-        `- 路径：\`${binding.workspace_path}\``,
-        "使用 `/setup` 克隆或切换仓库、分支。",
-      ].join("\n");
+      ]);
     }
-    return [
-      `✅ 已为当前群创建 workspace：\`${binding.workspace_name}\``,
+    return cardReply("绑定 Workspace", [
+      `✅ 已创建 \`${binding.workspace_name}\``,
       `- Workspace ID：\`${binding.workspace_id}\``,
-      `- 路径：\`${binding.workspace_path}\``,
-      "其他群可通过 `/bind <workspace-id>` 直接复用这个空间。",
-      "使用 `/setup` 克隆仓库并选择主仓库和分支。",
-    ].join("\n");
+      "- 下一步：`/setup`",
+    ]);
   },
 };
 
@@ -134,8 +154,8 @@ const unbindHandler: CommandHandler = {
       return "❌ /unbind 仅在飞书群内可用。";
     }
     const removed = ctx.workspaceStore.deleteBinding(chatId);
-    if (!removed) return "ℹ️  当前群未绑定。";
-    return "✅ 群绑定已清除。后续消息将使用默认 workspace。";
+    if (!removed) return cardReply("解绑 Workspace", ["ℹ️  当前群未绑定。"]);
+    return cardReply("解绑 Workspace", ["✅ 已清除群绑定。"]);
   },
 };
 
@@ -145,10 +165,7 @@ const statusHandler: CommandHandler = {
   async execute(ctx) {
     const chatId = requireChatId(ctx);
     if (!chatId) {
-      return [
-        "ℹ️  当前不在飞书群上下文，正在使用默认 workspace。",
-        `默认路径：\`${ctx.workspaceStore.resolve(null).cwd}\``,
-      ].join("\n");
+      return cardReply("Workspace 状态", ["ℹ️  当前不在飞书会话上下文，使用默认 workspace。"]);
     }
     const resolution = ctx.workspaceStore.resolve(chatId);
     const isP2P = ctx.message.chat_type === "single";
@@ -159,46 +176,40 @@ const statusHandler: CommandHandler = {
           ? "ℹ️  当前单聊 **未绑定** 任何 workspace。"
           : "ℹ️  当前群 **未绑定**。",
       );
-      lines.push(`默认 workspace：\`${resolution.cwd}\``);
       if (isP2P) {
-        lines.push("使用 `/switch` 挑一个已有 workspace 绑定到单聊。");
+        lines.push("- 可用：`/switch`");
       } else {
-        lines.push(
-          "使用 `/setup` 初始化，或 `/bind <workspace-id>` 复用已有空间，或 `/switch` 交互式挑选。",
-        );
+        lines.push("- 可用：`/setup`  `/bind <workspace-id>`  `/switch`");
       }
-      return lines.join("\n");
+      return cardReply("Workspace 状态", lines);
     }
     lines.push("**当前群绑定：**");
     lines.push(`- Workspace ID：\`${resolution.binding.workspace_id}\``);
     lines.push(`- Workspace 名称：\`${resolution.binding.workspace_name}\``);
-    lines.push(`- Workspace 路径：\`${resolution.binding.workspace_path}\``);
     const activeRepo = resolution.binding.active_repo;
     const activeBranch = resolution.binding.active_branch;
     const activeLabel = activeRepo
       ? `\`${activeRepo}${activeBranch ? " " + activeBranch : ""}\``
       : "(未设置)";
     lines.push(`- 活跃仓库：${activeLabel}`);
-    lines.push("- 复用到其他群：`/bind <workspace-id>`");
     const repoStates = listRepoSyncState(resolution.binding.workspace_path);
     if (repoStates.length > 0) {
-      lines.push("", "**Workspace 中已克隆的仓库：**");
+      const repoLines: string[] = [];
       for (const s of repoStates) {
         const primary = s.name === activeRepo ? " ← 活跃" : "";
         const ahead_behind = formatAheadBehind(s.ahead, s.behind);
         const dirty = s.dirty ? " •" : "";
         const label = s.branch ? `${s.name} ${s.branch}` : s.name;
         const suffix = ahead_behind ? ` ${ahead_behind}` : "";
-        lines.push(`- \`${label}\`${suffix}${dirty}${primary}`);
+        repoLines.push(`- \`${label}\`${suffix}${dirty}${primary}`);
       }
-      lines.push("", "_使用 `/sync` 拉取远端更新。_");
+      return cardReply("Workspace 状态", lines, {
+        sections: [{ title: "仓库", lines: repoLines }],
+      });
     } else {
-      lines.push("", "_Workspace 还没有克隆任何仓库。_");
+      lines.push("- 仓库：0");
     }
-    if (ctx.message.thread_id) {
-      lines.push("", `**当前话题的 session：** \`${ctx.message.session_id}\``);
-    }
-    return lines.join("\n");
+    return cardReply("Workspace 状态", lines);
   },
 };
 
@@ -215,11 +226,11 @@ const syncHandler: CommandHandler = {
     ctx.logger.info({ workspace_path: workspacePath }, "manual /sync requested");
     const results = await syncWorkspace(workspacePath, { pull: true });
     if (results.length === 0) {
-      return `_\`${workspacePath}\` 下没有 git 仓库。_`;
+      return cardReply("同步结果", ["ℹ️  当前 workspace 下没有 git 仓库。"]);
     }
-    const lines = [`**\`${workspacePath}\` 同步结果：**`];
-    for (const r of results) lines.push(_formatSyncLine(r));
-    return lines.join("\n");
+    return cardReply("同步结果", [], {
+      sections: [{ title: "仓库", lines: results.map(_formatSyncLine) }],
+    });
   },
 };
 
@@ -232,15 +243,17 @@ const lsHandler: CommandHandler = {
     const workspacePath = resolution.binding?.workspace_path ?? resolution.cwd;
     const repos = listRepoBasenames(workspacePath);
     if (repos.length === 0) {
-      return `_\`${workspacePath}\` 下还没有仓库。使用 \`/clone <git-url>\` 添加一个。_`;
+      return cardReply("仓库", ["ℹ️  当前 workspace 还没有仓库。"]);
     }
     const primary = resolution.binding?.active_repo;
-    const lines = [`**\`${workspacePath}\` 下的仓库：**`];
+    const lines: string[] = [];
     for (const name of repos) {
       const mark = name === primary ? " ← 活跃" : "";
       lines.push(`- \`${name}\`${mark}`);
     }
-    return lines.join("\n");
+    return cardReply("仓库", [], {
+      sections: [{ title: "列表", lines }],
+    });
   },
 };
 
@@ -273,10 +286,7 @@ const cloneHandler: CommandHandler = {
     if (!result.ok) {
       return `❌ \`git clone\` 失败：\n\`\`\`\n${result.stderr || result.stdout}\n\`\`\``;
     }
-    return [
-      `✅ 已克隆 \`${name}\` 到 workspace。`,
-      "继续执行 `/setup` 选择主仓库和分支。",
-    ].join("\n");
+    return cardReply("克隆完成", [`✅ 已克隆 \`${name}\`.`]);
   },
 };
 
@@ -295,7 +305,7 @@ const checkoutHandler: CommandHandler = {
     if (!branch) return "用法：`/checkout <分支>`";
     const resolution = ctx.workspaceStore.resolve(chatId);
     if (!resolution.binding?.active_repo) {
-      return "❌ 当前群没有活跃仓库。请先执行 `/bind <仓库> <分支>`。";
+      return "❌ 当前群没有活跃仓库。请先执行 `/setup`。";
     }
     const repoPath = join(
       resolution.binding.workspace_path,
@@ -311,7 +321,9 @@ const checkoutHandler: CommandHandler = {
       return `❌ \`git checkout ${branch}\` 失败：\n\`\`\`\n${result.stderr || result.stdout}\n\`\`\``;
     }
     ctx.workspaceStore.upsertBinding(chatId, { active_branch: branch });
-    return `✅ \`${resolution.binding.active_repo}\` 已切换到分支 \`${branch}\`。`;
+    return cardReply("切换分支", [
+      `✅ \`${resolution.binding.active_repo}\` 已切换到 \`${branch}\``,
+    ]);
   },
 };
 
@@ -319,14 +331,20 @@ export const helpHandler: CommandHandler = {
   name: "help",
   description: "/help — 显示所有可用命令",
   async execute() {
-    return [
-      "**可用命令（不经大模型直接执行）：**",
-      ...BUILTIN_COMMANDS.map((h) => `- ${h.description}`),
-      "- /help — 显示本消息",
-      "- /stop — 取消当前 session 正在执行的任务",
-      "- /setup — 打开交互卡片，创建或更新 workspace，并设置主仓库/分支（仅群聊）",
-      "- /switch — 打开交互卡片，切换当前会话到已有 workspace（群聊 & 单聊）",
-    ].join("\n");
+    return cardReply("可用命令", [], {
+      sections: [
+        {
+          title: "命令",
+          lines: [
+            ...BUILTIN_COMMANDS.map((h) => `- ${h.description}`),
+            "- /help — 显示本消息",
+            "- /stop — 取消当前 session 正在执行的任务",
+            "- /setup — 打开 workspace 配置卡片（仅群聊）",
+            "- /switch — 打开 workspace 切换卡片（群聊 & 单聊）",
+          ],
+        },
+      ],
+    });
   },
 };
 

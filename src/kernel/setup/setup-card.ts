@@ -15,7 +15,7 @@ import {
   buildCardIntro,
   buildMarkdown,
   buildResultCard,
-  buildSectionPanel,
+  buildSectionBlock,
 } from "./card-ui";
 
 /**
@@ -116,14 +116,10 @@ export function buildSetupCard(
     if (options.workspace_name?.id) {
       currentSummaryLines.push(`- Workspace ID：\`${options.workspace_name.id}\``);
     }
-    bodyElements.push(
-      buildSectionPanel({
-        title: "当前状态",
-        expanded: true,
-        tone: "neutral",
-        elements: [buildMarkdown(currentSummaryLines.join("\n"))],
-      }),
-    );
+    bodyElements.push(...buildSectionBlock({
+      title: "当前状态",
+      lines: currentSummaryLines,
+    }));
   }
 
   bodyElements.push(form);

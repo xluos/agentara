@@ -1,5 +1,6 @@
 import { FeishuMessageChannel } from "@/community/feishu";
 import * as feishuMessagingSchema from "@/community/feishu/messaging/data";
+import type { Card } from "@/community/feishu/messaging/types";
 import { DataConnection } from "@/data";
 import type { AssistantMessage, CardActionPayload, UserMessage } from "@/shared";
 import {
@@ -13,7 +14,8 @@ import {
 
 import { HonoServer } from "../server";
 
-import { CommandRegistry, parseCommand } from "./commands";
+import { CommandRegistry, parseCommand, type CardCommandResult } from "./commands";
+import { buildCommandCard } from "./commands/cards";
 import { MultiChannelMessageGateway } from "./messaging";
 import { SessionManager } from "./sessioning";
 import * as sessioningSchema from "./sessioning/data";
@@ -258,14 +260,21 @@ class Kernel {
     const handler = this._commandRegistry.get(parsed.name);
     if (!handler) return false;
     let replyText: string;
+    let replyCard: CardCommandResult | null = null;
     try {
-      replyText = await handler.execute({
+      const result = await handler.execute({
         message,
         args: parsed.args,
         raw: parsed.raw,
         workspaceStore: this._workspaceStore,
         logger: this._logger,
       });
+      if (typeof result === "string") {
+        replyText = result;
+      } else {
+        replyText = result.fallback_text;
+        replyCard = result;
+      }
     } catch (err) {
       this._logger.error(
         { err, command: parsed.name, chat_id: message.chat_id },
@@ -273,18 +282,11 @@ class Kernel {
       );
       replyText = `❌ 命令 \`/${parsed.name}\` 执行失败：${(err as Error).message}`;
     }
-    await this._messageGateway.replyMessage(
-      message.id,
-      {
-        role: "assistant",
-        session_id: message.session_id,
-        content: [{ type: "text", text: replyText }],
-      },
-      {
-        channelId: message.channel_id,
-        streaming: false,
-        replyInThread: false,
-      },
+    await this._replyTextOrCard(
+      message,
+      replyText,
+      replyCard?.card,
+      parsed.name,
     );
     return true;
   };
@@ -296,35 +298,77 @@ class Kernel {
 
     if (runningTaskId) {
       await this._taskDispatcher.deleteTask(runningTaskId);
-      await this._messageGateway.replyMessage(
-        message.id,
-        {
-          role: "assistant",
-          session_id: sessionId,
-          content: [{ type: "text", text: "✅ 任务已取消。" }],
-        },
-        {
-          channelId: message.channel_id,
-          streaming: false,
-          replyInThread: false,
-        },
+      await this._replyTextOrCard(
+        message,
+        "✅ 任务已取消。",
+        buildCommandCard({
+          title: "停止任务",
+          lines: ["✅ 任务已取消。"],
+        }),
+        "stop",
       );
     } else {
-      await this._messageGateway.replyMessage(
-        message.id,
-        {
-          role: "assistant",
-          session_id: sessionId,
-          content: [{ type: "text", text: "ℹ️  当前 session 没有正在执行的任务。" }],
-        },
-        {
-          channelId: message.channel_id,
-          streaming: false,
-          replyInThread: false,
-        },
+      await this._replyTextOrCard(
+        message,
+        "ℹ️  当前 session 没有正在执行的任务。",
+        buildCommandCard({
+          title: "停止任务",
+          lines: ["ℹ️  当前 session 没有正在执行的任务。"],
+        }),
+        "stop",
       );
     }
   };
+
+  private async _replyTextOrCard(
+    message: UserMessage,
+    text: string,
+    card?: Card,
+    commandName?: string,
+  ): Promise<void> {
+    if (
+      card &&
+      message.channel_id &&
+      message.chat_id &&
+      this._feishuChannels.get(message.channel_id)
+    ) {
+      try {
+        await this._feishuChannels.get(message.channel_id)!.sendRawCard(
+          message.chat_id,
+          card,
+          {
+            replyTo: message.id,
+            replyInThread: false,
+          },
+        );
+        return;
+      } catch (err) {
+        this._logger.error(
+          {
+            err,
+            command: commandName,
+            message_id: message.id,
+            chat_id: message.chat_id,
+          },
+          "command card reply failed; falling back to text",
+        );
+      }
+    }
+
+    await this._messageGateway.replyMessage(
+      message.id,
+      {
+        role: "assistant",
+        session_id: message.session_id,
+        content: [{ type: "text", text }],
+      },
+      {
+        channelId: message.channel_id,
+        streaming: false,
+        replyInThread: false,
+      },
+    );
+  }
 
   private _handleMessageRecall = async (
     messageId: string,

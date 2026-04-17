@@ -96,6 +96,16 @@ export function buildSectionPanel(options: {
   };
 }
 
+export function buildSectionBlock(options: {
+  title: string;
+  lines: string[];
+}): Element[] {
+  return [
+    buildMarkdown(`**${options.title}**`),
+    buildMarkdown(options.lines.join("\n")),
+  ];
+}
+
 export function buildResultCard(options: {
   title: string;
   summary: string;
@@ -111,14 +121,14 @@ export function buildResultCard(options: {
   ];
 
   if ((options.detail?.length ?? 0) > 0) {
-    elements.push(
-      buildSectionPanel({
-        title: `查看详情（${options.detail!.length} 项）`,
-        expanded: true,
-        tone,
-        elements: [buildMarkdown(options.detail!.join("\n"))],
-      }),
-    );
+    if (tone !== "neutral") {
+      elements.push(
+        buildMarkdown(`<font color='grey'>详情</font>`, {
+          text_size: "notation",
+        }),
+      );
+    }
+    elements.push(buildMarkdown(options.detail!.join("\n")));
   }
 
   return {

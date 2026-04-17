@@ -12,7 +12,7 @@ import {
   buildCardIntro,
   buildMarkdown,
   buildResultCard,
-  buildSectionPanel,
+  buildSectionBlock,
 } from "./card-ui";
 
 /**
@@ -64,36 +64,20 @@ export function buildSwitchCard(options: SwitchCardOptions): Card {
   ];
 
   if (current) {
-    body.push(
-      buildSectionPanel({
-        title: "当前绑定",
-        expanded: true,
-        tone: "neutral",
-        elements: [
-          buildMarkdown(
-            [
-              `- 名称：\`${current.workspace_name}\``,
-              `- ID：\`${current.workspace_id}\``,
-              `- 活跃仓库：\`${current.active_repo ?? "(未设置)"}\``,
-              `- 活跃分支：\`${current.active_branch ?? "(未设置)"}\``,
-            ].join("\n"),
-          ),
-        ],
-      }),
-    );
+    body.push(...buildSectionBlock({
+      title: "当前绑定",
+      lines: [
+        `- 名称：\`${current.workspace_name}\``,
+        `- ID：\`${current.workspace_id}\``,
+        `- 活跃仓库：\`${current.active_repo ?? "(未设置)"}\``,
+        `- 活跃分支：\`${current.active_branch ?? "(未设置)"}\``,
+      ],
+    }));
   } else {
-    body.push(
-      buildSectionPanel({
-        title: "当前绑定",
-        expanded: true,
-        tone: "neutral",
-        elements: [
-          buildMarkdown(
-            "_当前会话还没有绑定任何 workspace，正在使用默认 workspace。_",
-          ),
-        ],
-      }),
-    );
+    body.push(...buildSectionBlock({
+      title: "当前绑定",
+      lines: ["- 当前会话未绑定 workspace"],
+    }));
   }
 
   const select = _buildWorkspaceSelect(workspaces, current?.workspace_id);

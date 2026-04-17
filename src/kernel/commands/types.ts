@@ -1,5 +1,6 @@
 import type { Logger, UserMessage } from "@/shared";
 
+import type { Card } from "../../community/feishu/messaging/types";
 import type { GroupWorkspaceStore } from "../workspaces";
 
 /**
@@ -21,6 +22,14 @@ export interface CommandContext {
   logger: Logger;
 }
 
+export interface CardCommandResult {
+  kind: "card";
+  card: Card;
+  fallback_text: string;
+}
+
+export type CommandResult = string | CardCommandResult;
+
 /** A gateway-level command that bypasses the LLM entirely. */
 export interface CommandHandler {
   /** Command name without the leading slash (lowercase). */
@@ -31,5 +40,5 @@ export interface CommandHandler {
   execute(
     // eslint-disable-next-line no-unused-vars
     ctx: CommandContext,
-  ): Promise<string>;
+  ): Promise<CommandResult>;
 }

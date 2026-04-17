@@ -76,10 +76,11 @@ describe("buildSetupCard", () => {
 
     expect(card.head).toBeUndefined();
     expect(card.body.elements[1]).toMatchObject({
-      tag: "collapsible_panel",
-      header: { title: { content: "当前状态" } },
+      tag: "markdown",
+      content: "**当前状态**",
     });
-    expect(card.body.elements[2]).toMatchObject({ tag: "form" });
+    expect(card.body.elements[2]).toMatchObject({ tag: "markdown" });
+    expect(card.body.elements[3]).toMatchObject({ tag: "form" });
   });
 });
 
@@ -108,11 +109,11 @@ describe("buildSwitchCard", () => {
 
     expect(card.head).toBeUndefined();
     expect(card.body.elements[1]).toMatchObject({
-      tag: "collapsible_panel",
-      header: { title: { content: "当前绑定" } },
+      tag: "markdown",
+      content: "**当前绑定**",
     });
 
-    const form = card.body.elements[2];
+    const form = card.body.elements[3];
     expect(form).toBeTruthy();
     if (!form || form.tag !== "form") throw new Error("expected switch form");
 
