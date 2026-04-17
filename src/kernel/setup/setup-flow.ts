@@ -3,10 +3,11 @@ import { join } from "node:path";
 
 import type { Logger } from "@/shared";
 import {
-  config,
   createLogger,
   loadPredefinedRepos,
+  slugifyWorkspaceName,
   type CardActionPayload,
+  type GroupWorkspace,
   type PredefinedRepo,
   type UserMessage,
 } from "@/shared";
@@ -36,6 +37,8 @@ interface PendingSetup {
    * echo their checked state back — we force-include them on submit.
    */
   locked_repos: Set<string>;
+  /** Existing workspace id, when editing an already-bound workspace. */
+  locked_workspace_id?: string;
   created_at: number;
 }
 
@@ -109,17 +112,23 @@ export class SetupFlow {
       return;
     }
 
-    // Re-runs are allowed. Ensure the binding row + workspace dir exist so
-    // we can inspect what's already cloned and pre-fill the card accordingly.
-    const binding = this._workspaceStore.upsertBinding(chatId, {});
-    const { prefills, lockedRepos } = this._buildPrefills(
-      binding.workspace_path,
-      catalog,
+    // Re-runs reuse the existing workspace path (locked on the card);
+    // first runs propose a slug derived from the group name and let the
+    // user customize it. We defer creating the binding/dir until submit.
+    const binding = this._workspaceStore.getBinding(chatId);
+    const workspaceNameState = await this._resolveWorkspaceNameState(
+      chatId,
+      binding,
+      channel,
     );
+    const { prefills, lockedRepos } = binding
+      ? this._buildPrefills(binding.workspace_path, catalog)
+      : { prefills: {}, lockedRepos: new Set<string>() };
 
     const card = buildSetupCard(catalog, {
       prefills,
-      primary_repo: binding.active_repo ?? undefined,
+      primary_repo: binding?.active_repo ?? undefined,
+      workspace_name: workspaceNameState,
     });
     const cardMessageId = await channel.sendRawCard(chatId, card, {
       replyTo: message.id,
@@ -129,6 +138,7 @@ export class SetupFlow {
       initiator_open_id: message.sender_open_id ?? "",
       catalog_snapshot: catalog,
       locked_repos: lockedRepos,
+      locked_workspace_id: binding?.workspace_id,
       created_at: Date.now(),
     });
     this._logger.info(
@@ -220,15 +230,26 @@ export class SetupFlow {
       "pending-state",
     );
 
-    const workspacePath = config.paths.resolveGroupWorkspacePath(
+    // Workspace name is a pure display label — freely editable on every
+    // run. The directory path is derived from the stable workspace id by
+    // the store, so changing the name never moves files on disk. We resolve
+    // the requested name here and pass it through; the store's mutation
+    // path decides whether to create a new workspace or rename an existing
+    // one. The old `workspace_path` hint is no longer useful.
+    const workspaceName = this._resolveWorkspaceNameFromForm(
+      payload.form_value[SETUP_FIELD.workspaceName],
       pending.chat_id,
     );
-    if (!existsSync(workspacePath)) {
-      const { mkdirSync } = await import("node:fs");
-      mkdirSync(workspacePath, { recursive: true });
-    }
 
     const results: RepoResult[] = [];
+    const provisionalBinding = this._workspaceStore.upsertBinding(
+      pending.chat_id,
+      {
+        workspace_id: pending.locked_workspace_id,
+        workspace_name: workspaceName,
+      },
+    );
+    const workspacePath = provisionalBinding.workspace_path;
     for (const sel of selections) {
       results.push(await this._cloneAndCheckout(workspacePath, sel));
     }
@@ -241,15 +262,21 @@ export class SetupFlow {
       primaryResult && primaryResult.status !== "clone_failed" ? primary : null;
     const activeBranch = primaryResult?.actual_branch ?? null;
 
-    this._workspaceStore.upsertBinding(pending.chat_id, {
+    const binding = this._workspaceStore.upsertBinding(pending.chat_id, {
       active_repo: activeRepo,
       active_branch: activeBranch,
     });
 
-    const lines = results.map(_formatResultLine);
+    const lines = [
+      `- Workspace ID: \`${binding.workspace_id}\``,
+      `- Workspace 名称: \`${binding.workspace_name}\``,
+      `- Workspace 路径: \`${binding.workspace_path}\``,
+      "- 其他群可用 `/bind <workspace-id>` 复用这个空间。",
+      ...results.map(_formatResultLine),
+    ];
     const summary = activeRepo && activeBranch
       ? `✅ 初始化完成，主仓库 \`${activeRepo}\` @ \`${activeBranch}\`。`
-      : "❌ 所有仓库克隆失败，未建立绑定。";
+      : "⚠️  workspace 已创建，但这次没有成功设置主仓库。";
     await this._tryUpdateCard(
       channel,
       payload.message_id,
@@ -310,6 +337,52 @@ export class SetupFlow {
       out.push({ repo, name: repo.name, branch });
     }
     return out;
+  }
+
+  /**
+   * Build the workspace-name input's pre-fill + lock state.
+   *
+   * - Re-run (binding exists): the current directory basename is locked in
+   *   and the stable workspace id is surfaced too, so the user can copy it
+   *   out and run `/bind <id>` from another group.
+   * - First run: try to fetch the Feishu group name; slugify it and append
+   *   `-workspace` to produce a human-readable default. If the group name
+   *   is unavailable or sluggifies to nothing, fall back to a chat-id
+   *   prefix so the input never starts empty.
+   */
+  private async _resolveWorkspaceNameState(
+    chatId: string,
+    binding: GroupWorkspace | null,
+    channel: FeishuMessageChannel,
+  ): Promise<{ value: string; locked: boolean; id?: string }> {
+    if (binding) {
+      return {
+        value: binding.workspace_name,
+        locked: true,
+        id: binding.workspace_id,
+      };
+    }
+    const groupName = await channel.getChatName(chatId);
+    const slug = groupName ? slugifyWorkspaceName(groupName) : "";
+    const fallback = _chatIdFallbackSlug(chatId);
+    const value = slug ? `${slug}-workspace` : `${fallback}-workspace`;
+    return { value, locked: false };
+  }
+
+  /**
+   * Resolve the workspace path from the form's `workspace_name` field on
+   * first-run submission. Sluggifies whatever the user typed; if nothing
+   * usable survives (empty/whitespace-only input), falls back to the
+   * chat-id-based path so we never write a binding with an empty name.
+   */
+  private _resolveWorkspaceNameFromForm(
+    rawValue: unknown,
+    chatId: string,
+  ): string {
+    const slug =
+      typeof rawValue === "string" ? slugifyWorkspaceName(rawValue) : "";
+    if (slug) return slug;
+    return _chatIdFallbackSlug(chatId);
   }
 
   /**
@@ -460,6 +533,17 @@ function _summarizeFeishuError(
     msg: candidate.response?.data?.msg ?? candidate.message,
     status: candidate.response?.status,
   };
+}
+
+/**
+ * Readable-ish short form of a Feishu chat id — used when the group name
+ * is unavailable so the default workspace name is still unique + stable.
+ * Strips the `oc_` prefix (always present on chat ids) and keeps the first
+ * 8 chars of the opaque suffix.
+ */
+function _chatIdFallbackSlug(chatId: string): string {
+  const stripped = chatId.replace(/^oc_/, "");
+  return stripped.slice(0, 8) || "group";
 }
 
 function _readCurrentBranch(repoPath: string): string | undefined {

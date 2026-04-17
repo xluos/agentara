@@ -38,11 +38,24 @@ export const uploads = join(workspace, "uploads");
 export const outputs = join(workspace, "outputs");
 
 /**
- * Per-group workspace root container: `$AGENTARA_HOME/workspaces/<chat_id>/`.
+ * Workspace root container: `$AGENTARA_HOME/workspaces/<workspace_id>/`.
  * `_default/` inside it is the fallback workspace for unbound groups.
+ *
+ * Each workspace directory is keyed by its stable `ws_xxx` id so the
+ * human-readable `name` stays a pure display label — it can be renamed
+ * at any time without moving files. `resolveWorkspacePathByName` stays
+ * for diagnostics; `resolveGroupWorkspacePath` is kept only for legacy
+ * bindings created before id-based paths existed and is normalized away
+ * at boot.
  */
 export const workspaces = join(home, "workspaces");
 export const default_workspace = join(workspaces, "_default");
+export function resolveWorkspacePathById(workspace_id: string) {
+  return join(workspaces, workspace_id);
+}
+export function resolveWorkspacePathByName(name: string) {
+  return join(workspaces, name);
+}
 export function resolveGroupWorkspacePath(chat_id: string) {
   return join(workspaces, chat_id);
 }

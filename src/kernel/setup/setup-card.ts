@@ -17,6 +17,7 @@ import type {
  * handler. Keep them in one place so the two sides cannot drift apart.
  */
 export const SETUP_FIELD = {
+  workspaceName: "workspace_name",
   repoChecker: (name: string) => `repo_${name}`,
   branchInput: (name: string) => `branch_${name}`,
   primaryRepo: "primary_repo",
@@ -40,6 +41,14 @@ export interface SetupCardOptions {
   prefills?: Record<string, RepoPrefill>;
   /** Primary repo to preselect in the bottom dropdown (usually current active_repo). */
   primary_repo?: string;
+  /**
+   * Pre-fill + lock state for the workspace-name input.
+   * - First run: `value` is the suggested default (editable); no `id` yet.
+   * - Re-run: `value` is the current workspace directory name, `locked: true`,
+   *   `id` is the stable workspace id shown alongside so the user can copy
+   *   it out and `/bind <id>` from another group.
+   */
+  workspace_name?: { value: string; locked: boolean; id?: string };
 }
 
 /**
@@ -68,6 +77,9 @@ export function buildSetupCard(
   const prefills = options.prefills ?? {};
   const hasExisting = Object.values(prefills).some((p) => p.already_cloned);
 
+  if (options.workspace_name) {
+    formElements.push(..._buildWorkspaceNameInput(options.workspace_name));
+  }
   for (const repo of catalog) {
     formElements.push(_buildRepoRow(repo, prefills[repo.name]));
   }
@@ -113,6 +125,33 @@ export function buildSetupCard(
       elements: [header, form],
     },
   };
+}
+
+function _buildWorkspaceNameInput(
+  state: NonNullable<SetupCardOptions["workspace_name"]>,
+): Element[] {
+  // Stack label + input vertically so narrow cards (mobile) don't squeeze
+  // the label into a sliver. The stable id sits on its own line as a small
+  // annotation below the input; on first run it's omitted entirely.
+  const label: MarkdownElement = {
+    tag: "markdown",
+    content: "**Workspace 名称**",
+  };
+  const input: InputElement = {
+    tag: "input",
+    name: SETUP_FIELD.workspaceName,
+    placeholder: { tag: "plain_text", content: "workspace 名称" },
+    default_value: state.value,
+    width: "fill",
+  };
+  const elements: Element[] = [label, input];
+  if (state.id) {
+    elements.push({
+      tag: "markdown",
+      content: `<font color='grey'>当前 ID \`${state.id}\`</font>`,
+    });
+  }
+  return elements;
 }
 
 function _buildRepoRow(
@@ -189,7 +228,7 @@ function _buildSubmitButton(): ButtonElement {
   return {
     tag: "button",
     name: "setup_submit",
-    text: { tag: "plain_text", content: "✅ 初始化" },
+    text: { tag: "plain_text", content: "提交" },
     type: "primary",
     action_type: "form_submit",
   };

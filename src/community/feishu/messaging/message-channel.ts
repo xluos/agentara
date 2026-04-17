@@ -214,6 +214,26 @@ export class FeishuMessageChannel
   }
 
   /**
+   * Best-effort fetch of a chat's display name. The bot must be a member of
+   * the chat, with `im:chat` or `im:chat:readonly` scope. Returns undefined
+   * on any failure (permission denied, chat not found, network error) so
+   * callers can fall back to a deterministic default.
+   */
+  async getChatName(chatId: string): Promise<string | undefined> {
+    try {
+      const { data } = await this._client.im.chat.get({
+        path: { chat_id: chatId },
+      });
+      const name =
+        data?.i18n_names?.zh_cn ?? data?.name ?? data?.i18n_names?.en_us;
+      return typeof name === "string" && name.trim() ? name.trim() : undefined;
+    } catch (err) {
+      this._logger.warn({ err, chat_id: chatId }, "getChatName failed");
+      return undefined;
+    }
+  }
+
+  /**
    * Replace the content of an existing interactive card message. Used by
    * card-driven flows to transition the same message from "pending" to
    * "completed" without spawning a new reply.

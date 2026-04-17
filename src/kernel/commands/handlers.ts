@@ -40,10 +40,38 @@ async function execGit(
 
 const bindHandler: CommandHandler = {
   name: "bind",
-  description: "/bind — 绑定当前群到一个 workspace（不存在则创建）",
+  description: "/bind [workspace-id] — 绑定当前群到一个 workspace；传 id 时复用已有空间",
   async execute(ctx) {
     const chatId = requireChatId(ctx);
     if (!chatId) return "❌ /bind 仅在飞书群内可用。";
+    const [workspaceId] = ctx.args;
+    if (workspaceId) {
+      const workspace = ctx.workspaceStore.getWorkspace(workspaceId);
+      if (!workspace) {
+        return `❌ workspace id \`${workspaceId}\` 不存在。先在已有群里执行 \`/status\` 或 \`/setup\` 获取正确的 id。`;
+      }
+      // Don't reset active_repo/active_branch here — they live on the
+      // workspace and are shared by every bound group. Inherit whatever the
+      // workspace already has.
+      const binding = ctx.workspaceStore.upsertBinding(chatId, {
+        workspace_id: workspaceId,
+      });
+      ctx.logger.info(
+        { chat_id: chatId, workspace_id: workspaceId, binding },
+        "group rebound to existing workspace",
+      );
+      const activeLine = binding.active_repo
+        ? `- 活跃仓库：\`${binding.active_repo}\`${
+            binding.active_branch ? ` @ \`${binding.active_branch}\`` : ""
+          }`
+        : "- 活跃仓库：(未设置，可用 `/setup` 配置)";
+      return [
+        `✅ 当前群已绑定到已有 workspace：\`${binding.workspace_name}\``,
+        `- Workspace ID：\`${binding.workspace_id}\``,
+        `- 路径：\`${binding.workspace_path}\``,
+        activeLine,
+      ].join("\n");
+    }
     const existing = ctx.workspaceStore.getBinding(chatId);
     // Empty patch: just ensure the binding row + workspace dir exist; don't
     // touch active_repo/active_branch (those are managed by /setup).
@@ -51,12 +79,17 @@ const bindHandler: CommandHandler = {
     ctx.logger.info({ chat_id: chatId, binding }, "group binding ensured");
     if (existing) {
       return [
-        `ℹ️  当前群已绑定 workspace：\`${binding.workspace_path}\``,
+        `ℹ️  当前群已绑定 workspace：\`${binding.workspace_name}\``,
+        `- Workspace ID：\`${binding.workspace_id}\``,
+        `- 路径：\`${binding.workspace_path}\``,
         "使用 `/setup` 克隆或切换仓库、分支。",
       ].join("\n");
     }
     return [
-      `✅ 已为当前群创建 workspace：\`${binding.workspace_path}\``,
+      `✅ 已为当前群创建 workspace：\`${binding.workspace_name}\``,
+      `- Workspace ID：\`${binding.workspace_id}\``,
+      `- 路径：\`${binding.workspace_path}\``,
+      "其他群可通过 `/bind <workspace-id>` 直接复用这个空间。",
       "使用 `/setup` 克隆仓库并选择主仓库和分支。",
     ].join("\n");
   },
@@ -90,13 +123,16 @@ const statusHandler: CommandHandler = {
     if (!resolution.binding) {
       lines.push("ℹ️  当前群 **未绑定**。");
       lines.push(`默认 workspace：\`${resolution.cwd}\``);
-      lines.push("使用 `/bind <仓库> <分支>` 或 `/clone <git-url>` 来初始化。");
+      lines.push("使用 `/bind` 创建一个新 workspace，或 `/bind <workspace-id>` 复用已有空间。");
       return lines.join("\n");
     }
     lines.push("**当前群绑定：**");
-    lines.push(`- Workspace：\`${resolution.binding.workspace_path}\``);
+    lines.push(`- Workspace ID：\`${resolution.binding.workspace_id}\``);
+    lines.push(`- Workspace 名称：\`${resolution.binding.workspace_name}\``);
+    lines.push(`- Workspace 路径：\`${resolution.binding.workspace_path}\``);
     lines.push(`- 活跃仓库：\`${resolution.binding.active_repo ?? "(未设置)"}\``);
     lines.push(`- 活跃分支：\`${resolution.binding.active_branch ?? "(未设置)"}\``);
+    lines.push("- 复用到其他群：`/bind <workspace-id>`");
     const repos = listRepoBasenames(resolution.binding.workspace_path);
     if (repos.length > 0) {
       lines.push("", "**Workspace 中已克隆的仓库：**");
@@ -158,7 +194,7 @@ const cloneHandler: CommandHandler = {
     }
     return [
       `✅ 已克隆 \`${name}\` 到 workspace。`,
-      `使用 \`/bind ${name} <分支>\` 将其设为当前群的活跃仓库。`,
+      "继续执行 `/setup` 选择主仓库和分支。",
     ].join("\n");
   },
 };
@@ -202,7 +238,7 @@ export const helpHandler: CommandHandler = {
       ...BUILTIN_COMMANDS.map((h) => `- ${h.description}`),
       "- /help — 显示本消息",
       "- /stop — 取消当前 session 正在执行的任务",
-      "- /setup — 打开交互卡片，从 REPOS.md 里的仓库目录中批量克隆并绑定",
+      "- /setup — 打开交互卡片，创建或更新 workspace，并设置主仓库/分支",
     ].join("\n");
   },
 };
