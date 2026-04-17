@@ -40,33 +40,24 @@ async function execGit(
 
 const bindHandler: CommandHandler = {
   name: "bind",
-  description: "/bind <仓库> <分支> — 绑定当前群到指定仓库和分支",
+  description: "/bind — 绑定当前群到一个 workspace（不存在则创建）",
   async execute(ctx) {
     const chatId = requireChatId(ctx);
     if (!chatId) return "❌ /bind 仅在飞书群内可用。";
-    const [repo, branch] = ctx.args;
-    if (!repo || !branch) {
-      return "用法：`/bind <仓库目录名> <分支>`\n提示：若还未克隆，先用 `/clone <git-url>`。";
+    const existing = ctx.workspaceStore.getBinding(chatId);
+    // Empty patch: just ensure the binding row + workspace dir exist; don't
+    // touch active_repo/active_branch (those are managed by /setup).
+    const binding = ctx.workspaceStore.upsertBinding(chatId, {});
+    ctx.logger.info({ chat_id: chatId, binding }, "group binding ensured");
+    if (existing) {
+      return [
+        `ℹ️  当前群已绑定 workspace：\`${binding.workspace_path}\``,
+        "使用 `/setup` 克隆或切换仓库、分支。",
+      ].join("\n");
     }
-    const resolution = ctx.workspaceStore.resolve(chatId);
-    const workspacePath = resolution.binding?.workspace_path ?? resolution.cwd;
-    const repoPath = join(workspacePath, repo);
-    if (!existsSync(repoPath) || !existsSync(join(repoPath, ".git"))) {
-      return `❌ 在 workspace 中找不到 \`${repo}\`（\`${workspacePath}\`）。请先 \`/clone <git-url>\`，或用 \`/ls\` 查看已克隆的仓库。`;
-    }
-    const checkout = await execGit(["checkout", branch], repoPath);
-    if (!checkout.ok) {
-      return `❌ \`git checkout ${branch}\` 失败：\n\`\`\`\n${checkout.stderr || checkout.stdout}\n\`\`\``;
-    }
-    const binding = ctx.workspaceStore.upsertBinding(chatId, {
-      active_repo: repo,
-      active_branch: branch,
-    });
-    ctx.logger.info({ chat_id: chatId, binding }, "group binding updated");
     return [
-      `✅ 已将当前群绑定到 \`${repo}\` @ \`${branch}\``,
-      `Workspace：\`${binding.workspace_path}\``,
-      `后续消息将使用该仓库和分支，直到再次 \`/bind\` 或 \`/unbind\`。`,
+      `✅ 已为当前群创建 workspace：\`${binding.workspace_path}\``,
+      "使用 `/setup` 克隆仓库并选择主仓库和分支。",
     ].join("\n");
   },
 };
