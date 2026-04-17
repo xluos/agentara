@@ -822,7 +822,15 @@ export class FeishuMessageChannel
       !this._allowedUserOpenIds ||
       (senderOpenId != null && this._allowedUserOpenIds.has(senderOpenId));
 
-    const mentionEnforced = this._requireMention && chatType === "group";
+    // Slash commands (e.g. `/setup`, `/bind`) intentionally bypass the
+    // @-mention requirement — operators should be able to run them with a
+    // single keystroke in the chat bar. The sender whitelist still applies.
+    const isSlashCommand = _peekSlashCommand(
+      messageType,
+      receivedMessage.content,
+    );
+    const mentionEnforced =
+      this._requireMention && chatType === "group" && !isSlashCommand;
     const isBotMentioned =
       !!this._botOpenId &&
       !!mentions?.some((m) => m.id?.open_id === this._botOpenId);
@@ -836,6 +844,7 @@ export class FeishuMessageChannel
         message_type: messageType,
         sender_open_id: senderOpenId,
         bot_mentioned: isBotMentioned,
+        slash_command: isSlashCommand,
         passed: isAllowedSender && mentionOk,
       },
       "inbound message",
@@ -1050,5 +1059,22 @@ export class FeishuMessageChannel
       this._logger.error(`Unsupported message type: ${type}`);
       return { type: "text", text: "Unsupported message type" + type };
     }
+  }
+}
+
+/**
+ * Cheap check for whether an inbound Feishu message looks like a slash
+ * command, so we can skip the @-mention requirement for those. We only
+ * inspect raw `text` content — post/image/file messages are never
+ * considered slash commands. Parsing failures → treat as non-slash.
+ */
+function _peekSlashCommand(type: string, content: string): boolean {
+  if (type !== "text") return false;
+  try {
+    const json = JSON.parse(content) as { text?: unknown };
+    const text = typeof json.text === "string" ? json.text.trimStart() : "";
+    return /^\/[a-zA-Z]/.test(text);
+  } catch {
+    return false;
   }
 }
