@@ -392,9 +392,9 @@ export class GroupWorkspaceStore {
           ? "- _(none — run `/bind` in a chat to attach.)_"
           : bindings.map((b) => `- \`${b.chat_id}\``).join("\n");
       const active = workspace.active_repo
-        ? `\`${workspace.active_repo}\`${
-            workspace.active_branch ? ` @ \`${workspace.active_branch}\`` : ""
-          }`
+        ? `\`${workspace.active_repo}${
+            workspace.active_branch ? " " + workspace.active_branch : ""
+          }\``
         : "_(unset)_";
       const lines = [
         `# Workspace: ${workspace.name}`,

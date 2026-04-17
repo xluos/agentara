@@ -18,9 +18,10 @@ import { MultiChannelMessageGateway } from "./messaging";
 import { SessionManager } from "./sessioning";
 import * as sessioningSchema from "./sessioning/data";
 import { SetupFlow } from "./setup/setup-flow";
+import { SwitchFlow } from "./setup/switch-flow";
 import { TaskDispatcher } from "./tasking";
 import * as taskingSchema from "./tasking/data";
-import { GroupWorkspaceStore } from "./workspaces";
+import { GroupWorkspaceStore, syncWorkspace } from "./workspaces";
 
 /**
  * The kernel is the main entry point for the agentara application.
@@ -37,6 +38,7 @@ class Kernel {
   private _commandRegistry!: CommandRegistry;
   private _feishuChannels = new Map<string, FeishuMessageChannel>();
   private _setupFlow!: SetupFlow;
+  private _switchFlow!: SwitchFlow;
 
   constructor() {
     this._initDatabase();
@@ -46,6 +48,7 @@ class Kernel {
     this._initTaskDispatcher();
     this._initMessageGateway();
     this._initSetupFlow();
+    this._initSwitchFlow();
     this._initServer();
   }
 
@@ -142,6 +145,13 @@ class Kernel {
     });
   }
 
+  private _initSwitchFlow(): void {
+    this._switchFlow = new SwitchFlow({
+      workspaceStore: this._workspaceStore,
+      feishuChannels: this._feishuChannels,
+    });
+  }
+
   /**
    * Start the kernel.
    */
@@ -179,10 +189,26 @@ class Kernel {
       return;
     }
 
+    // Handle /switch command (kernel-owned — interactive card). Available in
+    // both group chats and P2P since switching binding only touches metadata.
+    if (text === "/switch") {
+      await this._switchFlow.start(message);
+      return;
+    }
+
     // Try gateway-level slash commands before dispatching to the LLM.
     if (text.startsWith("/")) {
       const handled = await this._tryHandleCommand(message, text);
       if (handled) return;
+    }
+
+    // On the first message of a new session, kick off a best-effort
+    // fetch + ff-pull across the workspace so the agent sees latest remote
+    // state. Fire-and-forget: the pull is atomic at the git level, the
+    // agent dispatch queue gives it a head start, and we don't want a
+    // flaky network to block the user's first turn.
+    if (isSessionStart && message.chat_id) {
+      this._autoSyncOnSessionStart(message.chat_id);
     }
 
     const task: InboundMessageTaskPayload = {
@@ -191,6 +217,37 @@ class Kernel {
     };
     await this._taskDispatcher.dispatch(message.session_id, task);
   };
+
+  private _autoSyncOnSessionStart(chatId: string): void {
+    const resolution = this._workspaceStore.resolve(chatId);
+    if (!resolution.binding) return;
+    const workspacePath = resolution.binding.workspace_path;
+    syncWorkspace(workspacePath, { pull: true, timeout_ms: 15_000 })
+      .then((results) => {
+        const ff = results.filter((r) => r.status === "fast_forwarded");
+        if (ff.length > 0) {
+          this._logger.info(
+            {
+              chat_id: chatId,
+              workspace: workspacePath,
+              fast_forwarded: ff.map((r) => ({
+                repo: r.name,
+                branch: r.branch,
+                before: r.before_sha,
+                after: r.after_sha,
+              })),
+            },
+            "session-start auto-sync fast-forwarded",
+          );
+        }
+      })
+      .catch((err) => {
+        this._logger.warn(
+          { err, chat_id: chatId, workspace: workspacePath },
+          "session-start auto-sync failed",
+        );
+      });
+  }
 
   private _tryHandleCommand = async (
     message: UserMessage,
@@ -284,12 +341,17 @@ class Kernel {
   };
 
   /**
-   * Route card-action callbacks by the `action_name` discriminator. Right now
-   * only `/setup` produces callbacks; unknown actions are logged and dropped.
+   * Route card-action callbacks by the `action_name` discriminator. Each
+   * interactive flow owns its own `action_name`; unknown actions are logged
+   * and dropped.
    */
   private _handleCardAction = async (payload: CardActionPayload) => {
     if (payload.action_name === "setup_submit") {
       await this._setupFlow.handleSubmit(payload);
+      return;
+    }
+    if (payload.action_name === "switch_submit") {
+      await this._switchFlow.handleSubmit(payload);
       return;
     }
     this._logger.warn(

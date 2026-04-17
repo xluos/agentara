@@ -866,12 +866,23 @@ export class FeishuMessageChannel
     }
 
     const session_id = this._resolveSessionId(chatId, threadId);
+    // Normalize Feishu's chat_type into the shared enum so command handlers
+    // can gate on group-vs-P2P without reaching back into provider details.
+    // Feishu emits `"p2p"` (not `"single"`) for 1:1 chats — accept both to be
+    // robust against SDK version drift.
+    const normalizedChatType: "group" | "single" | undefined =
+      chatType === "group"
+        ? "group"
+        : chatType === "p2p" || chatType === "single"
+          ? "single"
+          : undefined;
     const userMessage: UserMessage = {
       id: messageId,
       session_id,
       role: "user",
       channel_id: this.id,
       chat_id: chatId,
+      chat_type: normalizedChatType,
       thread_id: threadId,
       sender_open_id: senderOpenId,
       content: [

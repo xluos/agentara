@@ -48,6 +48,12 @@ export const UserMessage = BaseMessage.extend({
   channel_id: z.string().optional(),
   /** Feishu chat_id, when this message originated from a Feishu channel. */
   chat_id: z.string().optional(),
+  /**
+   * Feishu chat type: "group" for group chats, "single" for 1:1 (P2P).
+   * Only meaningful when `chat_id` is set. Left undefined for non-Feishu
+   * sources so consumers fall back to "permissive" defaults.
+   */
+  chat_type: z.enum(["group", "single"]).optional(),
   /** Feishu topic/thread id, when the message is inside a topic. */
   thread_id: z.string().optional(),
   /** Provider-specific open_id of the sender (e.g. Feishu open_id). */

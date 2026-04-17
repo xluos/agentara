@@ -98,6 +98,17 @@ export class SetupFlow {
       await this._replyText(message, "❌ /setup 仅在飞书群内可用。");
       return;
     }
+    // P2P is intentionally kept reuse-only — creating workspaces from single
+    // chats would produce stray rows keyed to every user's P2P chat_id and
+    // make the workspace list hard to reason about. Point users at /switch
+    // instead, which lets them bind to any already-existing workspace.
+    if (message.chat_type === "single") {
+      await this._replyText(
+        message,
+        "❌ /setup 仅在飞书群内可用；单聊请使用 `/switch` 挑选一个已有 workspace。",
+      );
+      return;
+    }
     const catalog = loadPredefinedRepos();
     if (catalog.length === 0) {
       await this._replyText(
@@ -224,7 +235,7 @@ export class SetupFlow {
       buildSetupResultCard(
         `⏳ 正在初始化 \`${selections.map((s) => s.name).join("、")}\`…`,
         selections.map(
-          (s) => `- \`${s.name}\` @ \`${s.branch}\``,
+          (s) => `- \`${s.name} ${s.branch}\``,
         ),
       ),
       "pending-state",
@@ -275,7 +286,7 @@ export class SetupFlow {
       ...results.map(_formatResultLine),
     ];
     const summary = activeRepo && activeBranch
-      ? `✅ 初始化完成，主仓库 \`${activeRepo}\` @ \`${activeBranch}\`。`
+      ? `✅ 初始化完成，主仓库 \`${activeRepo} ${activeBranch}\`。`
       : "⚠️  workspace 已创建，但这次没有成功设置主仓库。";
     await this._tryUpdateCard(
       channel,
@@ -430,6 +441,20 @@ export class SetupFlow {
           detail: clone.stderr || clone.stdout,
         };
       }
+    } else {
+      // Fetch so `git checkout <new-branch>` can find branches pushed after
+      // the initial clone. Fetch failures are non-fatal — if the user only
+      // wants to switch between already-known branches, offline is fine.
+      const fetch = await _execGit(
+        ["fetch", "--prune", "origin"],
+        targetPath,
+      );
+      if (!fetch.ok) {
+        this._logger.warn(
+          { repo: sel.name, stderr: fetch.stderr },
+          "git fetch failed before checkout; continuing with stale refs",
+        );
+      }
     }
 
     const co = await _execGit(["checkout", sel.branch], targetPath);
@@ -448,6 +473,23 @@ export class SetupFlow {
         status: "checkout_failed",
         detail: co.stderr || co.stdout,
       };
+    }
+
+    // After a successful checkout on an already-cloned repo, try a
+    // fast-forward pull so users who re-run /setup without changing the
+    // branch still get the latest commits. `--ff-only` refuses on dirty
+    // trees or divergence, which keeps this safe to run unconditionally.
+    if (alreadyCloned) {
+      const pull = await _execGit(
+        ["pull", "--ff-only", "--no-rebase"],
+        targetPath,
+      );
+      if (!pull.ok) {
+        this._logger.info(
+          { repo: sel.name, stderr: pull.stderr },
+          "ff-only pull skipped/failed; leaving at current commit",
+        );
+      }
     }
 
     return {
@@ -489,9 +531,9 @@ function _isTruthyChecker(v: unknown): boolean {
 function _formatResultLine(r: RepoResult): string {
   switch (r.status) {
     case "cloned":
-      return `- ✅ \`${r.name}\` @ \`${r.branch}\` 已克隆`;
+      return `- ✅ \`${r.name} ${r.branch}\` 已克隆`;
     case "exists":
-      return `- ℹ️  \`${r.name}\` 已存在，已切换到 \`${r.branch}\``;
+      return `- ℹ️  \`${r.name} ${r.branch}\` 已存在`;
     case "checkout_failed":
       return (
         `- ⚠️  \`${r.name}\` 已克隆，分支 \`${r.branch}\` 不可切换，` +
