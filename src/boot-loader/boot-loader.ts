@@ -257,13 +257,14 @@ const REPOS_MD_TEMPLATE = `# Predefined Repos
 This file is the agent's repo knowledge base.
 
 - The \`/setup\` command parses each H2 section as a repo:
-    - title (\`## <name>\`)           → repo directory name
-    - \`- git_url: <url>\` bullet     → clone URL
-    - first prose line              → short description shown on the card
+    - title (\`## <name>\`)                → repo directory name
+    - \`- git_url: <url>\` bullet          → clone URL
+    - \`- description: <one-liner>\` bullet → short tagline shown on the card
+- Keep \`description\` to one short sentence — the card only needs a
+  quick label, not the full context.
 - Everything else in a section is free-form prose for the agent to read
-  via CLAUDE.md's \`@REPOS.md\` import.
-- Feel free to update these descriptions as you learn more about each
-  repo — the agent is expected to maintain this file over time.
+  via CLAUDE.md's \`@REPOS.md\` import. Feel free to update it as you
+  learn more about each repo.
 -->
 
 <!-- Example — delete or replace with your own entries:
@@ -271,11 +272,11 @@ This file is the agent's repo knowledge base.
 ## agentara
 
 - git_url: https://github.com/magiccube/agentara.git
+- description: Bun + TypeScript personal assistant platform.
 
-Bun + TypeScript personal assistant platform. Core flow is
-BootLoader → Kernel → Session/Task/Message. Useful when a group is
-discussing the assistant platform itself, session/task orchestration,
-or Feishu bot integration.
+Core flow is BootLoader → Kernel → Session/Task/Message. Useful when
+a group is discussing the assistant platform itself, session/task
+orchestration, or Feishu bot integration.
 
 -->
 `;

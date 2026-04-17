@@ -11,10 +11,11 @@ import * as paths from "./paths";
  * CLAUDE.md's `@REPOS.md` import — and update in place as they learn more
  * about each repo.
  *
- * `description` is a short one-liner extracted from the first prose line
- * in the section; it is what the `/setup` card renders next to the repo
- * name. The rest of the section body is consumed by the agent, not by
- * the card renderer.
+ * `description` is a short one-liner shown on the `/setup` card next to
+ * the repo name. Prefer an explicit `- description: <one-liner>` bullet
+ * in the section so the card copy stays short; if absent we fall back to
+ * the first prose line for backward compatibility. The rest of the section
+ * body is free-form agent context, not used by the card renderer.
  */
 export const PredefinedRepo = z.object({
   name: z.string(),
@@ -43,15 +44,17 @@ interface _PartialRepo {
 
 /**
  * Parse a `REPOS.md`-style document. Each `## <name>` begins a repo;
- * the first `- git_url: <url>` bullet in its body fills `git_url`; the
- * first non-bullet, non-heading, non-comment prose line becomes the
- * one-line `description`.
+ * the first `- git_url: <url>` bullet fills `git_url`; a
+ * `- description: <one-liner>` bullet, if present, fills `description`.
+ * If that bullet is missing, we fall back to the first non-bullet,
+ * non-heading, non-comment prose line so older files still render.
  */
 function _parseReposMarkdown(markdown: string): PredefinedRepo[] {
   const lines = markdown.split(/\r?\n/);
   const out: PredefinedRepo[] = [];
   let current: _PartialRepo | null = null;
-  let descriptionCaptured = false;
+  let proseFallbackCaptured = false;
+  let hasExplicitDescription = false;
   let inHtmlComment = false;
 
   const flush = () => {
@@ -79,7 +82,8 @@ function _parseReposMarkdown(markdown: string): PredefinedRepo[] {
     if (h2) {
       flush();
       current = { name: h2[1]!.trim() };
-      descriptionCaptured = false;
+      proseFallbackCaptured = false;
+      hasExplicitDescription = false;
       continue;
     }
     if (!current) continue;
@@ -90,7 +94,14 @@ function _parseReposMarkdown(markdown: string): PredefinedRepo[] {
       continue;
     }
 
-    if (!descriptionCaptured) {
+    const desc = /^\s*-\s*description\s*:\s*(\S.*?)\s*$/.exec(line);
+    if (desc) {
+      current.description = desc[1];
+      hasExplicitDescription = true;
+      continue;
+    }
+
+    if (!hasExplicitDescription && !proseFallbackCaptured) {
       const trimmed = line.trim();
       if (
         trimmed &&
@@ -100,7 +111,7 @@ function _parseReposMarkdown(markdown: string): PredefinedRepo[] {
         !trimmed.startsWith(">")
       ) {
         current.description = trimmed;
-        descriptionCaptured = true;
+        proseFallbackCaptured = true;
       }
     }
   }
