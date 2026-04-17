@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 
+import { formatRepoRef } from "@/kernel/repo-ref";
 import type { Logger } from "@/shared";
 import {
   createLogger,
@@ -235,7 +236,7 @@ export class SetupFlow {
       buildSetupResultCard(
         `⏳ 正在初始化 \`${selections.map((s) => s.name).join("、")}\`…`,
         selections.map(
-          (s) => `- \`${s.name} ${s.branch}\``,
+          (s) => `- \`${formatRepoRef(s.name, s.branch)}\``,
         ),
       ),
       "pending-state",
@@ -284,7 +285,7 @@ export class SetupFlow {
       ...results.map(_formatResultLine),
     ];
     const summary = activeRepo && activeBranch
-      ? `✅ 初始化完成，主仓库 \`${activeRepo} ${activeBranch}\`。`
+      ? `✅ 初始化完成，主仓库 \`${formatRepoRef(activeRepo, activeBranch)}\`。`
       : "⚠️  workspace 已创建，但这次没有成功设置主仓库。";
     await this._tryUpdateCard(
       channel,
@@ -529,9 +530,9 @@ function _isTruthyChecker(v: unknown): boolean {
 function _formatResultLine(r: RepoResult): string {
   switch (r.status) {
     case "cloned":
-      return `- ✅ \`${r.name} ${r.branch}\` 已克隆`;
+      return `- ✅ \`${formatRepoRef(r.name, r.branch)}\` 已克隆`;
     case "exists":
-      return `- ℹ️  \`${r.name} ${r.branch}\` 已存在`;
+      return `- ℹ️  \`${formatRepoRef(r.name, r.branch)}\` 已存在`;
     case "checkout_failed":
       return (
         `- ⚠️  \`${r.name}\` 已克隆，分支 \`${r.branch}\` 不可切换，` +

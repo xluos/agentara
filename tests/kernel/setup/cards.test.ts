@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
 
+import { formatRepoRef } from "@/kernel/repo-ref";
 import { optimizeCardMarkdown } from "@/kernel/setup/card-ui";
 import {
   buildSetupCard,
@@ -132,6 +133,13 @@ describe("result cards", () => {
     expect(setupResult.head).toBeUndefined();
     expect(switchResult.head).toBeUndefined();
     expect(setupResult.body.elements[0]).toMatchObject({ tag: "markdown" });
+  });
+});
+
+describe("formatRepoRef", () => {
+  test("joins repo and branch with @", () => {
+    expect(formatRepoRef("agentara", "dev")).toBe("agentara@dev");
+    expect(formatRepoRef("agentara", null)).toBe("agentara");
   });
 });
 

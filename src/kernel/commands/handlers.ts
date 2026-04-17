@@ -1,6 +1,7 @@
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
 
+import { formatRepoRef } from "@/kernel/repo-ref";
 import {
   formatAheadBehind,
   listRepoSyncState,
@@ -113,9 +114,10 @@ const bindHandler: CommandHandler = {
         "group rebound to existing workspace",
       );
       const activeLine = binding.active_repo
-        ? `- 活跃仓库：\`${binding.active_repo}${
-            binding.active_branch ? " " + binding.active_branch : ""
-          }\``
+        ? `- 活跃仓库：\`${formatRepoRef(
+            binding.active_repo,
+            binding.active_branch,
+          )}\``
         : "- 活跃仓库：(未设置)";
       return cardReply("绑定 Workspace", [
         `✅ 当前群已绑定到 \`${binding.workspace_name}\``,
@@ -189,7 +191,7 @@ const statusHandler: CommandHandler = {
     const activeRepo = resolution.binding.active_repo;
     const activeBranch = resolution.binding.active_branch;
     const activeLabel = activeRepo
-      ? `\`${activeRepo}${activeBranch ? " " + activeBranch : ""}\``
+      ? `\`${formatRepoRef(activeRepo, activeBranch)}\``
       : "(未设置)";
     lines.push(`- 活跃仓库：${activeLabel}`);
     const repoStates = listRepoSyncState(resolution.binding.workspace_path);
@@ -199,7 +201,7 @@ const statusHandler: CommandHandler = {
         const primary = s.name === activeRepo ? " ← 活跃" : "";
         const ahead_behind = formatAheadBehind(s.ahead, s.behind);
         const dirty = s.dirty ? " •" : "";
-        const label = s.branch ? `${s.name} ${s.branch}` : s.name;
+        const label = formatRepoRef(s.name, s.branch);
         const suffix = ahead_behind ? ` ${ahead_behind}` : "";
         repoLines.push(`- \`${label}\`${suffix}${dirty}${primary}`);
       }
@@ -359,7 +361,7 @@ export const BUILTIN_COMMANDS: CommandHandler[] = [
 ];
 
 function _formatSyncLine(r: RepoSyncResult): string {
-  const label = r.branch ? `\`${r.name} ${r.branch}\`` : `\`${r.name}\``;
+  const label = `\`${formatRepoRef(r.name, r.branch)}\``;
   const ab = formatAheadBehind(r.ahead, r.behind);
   const abSuffix = ab ? ` ${ab}` : "";
   switch (r.status) {
