@@ -19,7 +19,7 @@ import {
 } from "@/shared";
 
 
-import { feishuThreads } from "./data";
+import { feishuBotGroups, feishuThreads } from "./data";
 import { renderMessageCard, splitMarkdownByTables } from "./message-renderer";
 import type { Card, MessageReceiveEventData } from "./types";
 import { convertPostToMarkdown } from "./utils";
@@ -62,6 +62,15 @@ export class FeishuMessageChannel
   private _logger: Logger;
   private _requireMention: boolean;
   private _botOpenId?: string;
+
+  /**
+   * Bot's own open_id as resolved at `start()`. `undefined` until the channel
+   * has started, and when `require_mention` is disabled the bot-info fetch
+   * is skipped so this stays undefined even post-start.
+   */
+  get botOpenId(): string | undefined {
+    return this._botOpenId;
+  }
   private _allowedUserOpenIds?: Set<string>;
   private _allowedUserEmails?: string[];
 
@@ -243,6 +252,197 @@ export class FeishuMessageChannel
       path: { message_id: messageId },
       data: { content: JSON.stringify(card) },
     });
+  }
+
+  /**
+   * Post a plain-text message into an arbitrary chat. Returns the posted
+   * message's id so callers can anchor follow-up replies (e.g. `/group`
+   * sends a welcome line then anchors its `/setup` card as a reply to it).
+   *
+   * Distinct from `postMessage(AssistantMessage)` which renders a card to
+   * this channel's default `config.chatId`.
+   */
+  async sendPlainText(chatId: string, text: string): Promise<string> {
+    const { data } = await this._client.im.message.create({
+      params: { receive_id_type: "chat_id" },
+      data: {
+        receive_id: chatId,
+        msg_type: "text",
+        content: JSON.stringify({ text }),
+      },
+    });
+    if (!data?.message_id) {
+      throw new Error("Failed to post plain text message");
+    }
+    return data.message_id;
+  }
+
+  /**
+   * Create a new group chat. The bot itself ends up as the initial owner;
+   * callers that want a human owner should follow up with
+   * {@link transferChatOwner}. `memberOpenIds` are added at creation time so
+   * no separate add-members round-trip is needed.
+   *
+   * Requires the `im:chat:create` scope.
+   */
+  async createChat(options: {
+    name: string;
+    memberOpenIds: string[];
+    description?: string;
+  }): Promise<string> {
+    const { data } = await this._client.im.chat.create({
+      params: { user_id_type: "open_id" },
+      data: {
+        name: options.name,
+        description: options.description,
+        chat_type: "private",
+        user_id_list: options.memberOpenIds,
+      },
+    });
+    if (!data?.chat_id) {
+      throw new Error("Feishu returned no chat_id when creating the chat");
+    }
+    return data.chat_id;
+  }
+
+  /**
+   * Transfer a group's owner to the specified user. The bot must currently
+   * be the owner. Requires the `im:chat.owner:update` scope.
+   */
+  async transferChatOwner(
+    chatId: string,
+    ownerOpenId: string,
+  ): Promise<void> {
+    await this._client.im.chat.update({
+      path: { chat_id: chatId },
+      params: { user_id_type: "open_id" },
+      data: { owner_id: ownerOpenId },
+    });
+  }
+
+  /**
+   * Dissolve a chat. Requires the bot to be the owner. Used by `/ungroup`
+   * to tear down groups the bot created earlier.
+   */
+  async dismissChat(chatId: string): Promise<void> {
+    await this._client.im.chat.delete({
+      path: { chat_id: chatId },
+    });
+  }
+
+  /**
+   * Look up a bot-created group by its chat_id. Returns undefined when the
+   * chat was not created by this bot (e.g. an existing group the bot was
+   * just added to).
+   */
+  findBotGroup(chatId: string):
+    | { chat_id: string; chat_name: string; creator_open_id: string }
+    | undefined {
+    const row = this._db
+      .select({
+        chat_id: feishuBotGroups.chat_id,
+        chat_name: feishuBotGroups.chat_name,
+        creator_open_id: feishuBotGroups.creator_open_id,
+      })
+      .from(feishuBotGroups)
+      .where(eq(feishuBotGroups.chat_id, chatId))
+      .get();
+    return row ?? undefined;
+  }
+
+  /**
+   * Find a bot-created group by either its display name or chat_id, scoped
+   * to a single creator. Used by `/ungroup <query>` from P2P so users can
+   * only dismiss groups they themselves created. Name match is exact
+   * (multiple groups may share a name; the caller must disambiguate).
+   */
+  findBotGroupForCreator(
+    query: string,
+    creatorOpenId: string,
+  ): Array<{ chat_id: string; chat_name: string }> {
+    return this._db
+      .select({
+        chat_id: feishuBotGroups.chat_id,
+        chat_name: feishuBotGroups.chat_name,
+      })
+      .from(feishuBotGroups)
+      .where(eq(feishuBotGroups.creator_open_id, creatorOpenId))
+      .all()
+      .filter((row) => row.chat_id === query || row.chat_name === query);
+  }
+
+  /** Remove a bot-group record. Call after a successful `dismissChat`. */
+  deleteBotGroupRecord(chatId: string): void {
+    this._db
+      .delete(feishuBotGroups)
+      .where(eq(feishuBotGroups.chat_id, chatId))
+      .run();
+  }
+
+  /**
+   * Add one or more users to the runtime whitelist and persist the change to
+   * `config.yaml`. Returns the open_ids that were actually new (not already
+   * in the set) so callers can report a precise count back to the user.
+   *
+   * Mutates the channel's in-memory set immediately — new entries take effect
+   * on the very next inbound message without a restart. Persistence keeps
+   * the change across restarts; we re-use Bun's YAML parser/stringifier so
+   * the file stays round-trippable.
+   */
+  async addToWhitelist(openIds: string[]): Promise<string[]> {
+    if (!this._allowedUserOpenIds) {
+      // The whitelist was disabled (empty set accepts everyone). Initialize
+      // a fresh one — the newly-added users become the whole allow-list.
+      this._allowedUserOpenIds = new Set<string>();
+    }
+    const added: string[] = [];
+    for (const openId of openIds) {
+      if (!this._allowedUserOpenIds.has(openId)) {
+        this._allowedUserOpenIds.add(openId);
+        added.push(openId);
+      }
+    }
+    if (added.length === 0) return added;
+    try {
+      await this._persistWhitelistToConfig();
+    } catch (err) {
+      this._logger.error(
+        { err, channel_id: this.id, added },
+        "failed to persist whitelist addition; in-memory set was still updated",
+      );
+      throw err;
+    }
+    return added;
+  }
+
+  private async _persistWhitelistToConfig(): Promise<void> {
+    const fs = await import("node:fs/promises");
+    const path = await import("node:path");
+    const { config: cfgModule } = await import("@/shared");
+    const configPath = path.join(cfgModule.paths.home, "config.yaml");
+    const raw = await fs.readFile(configPath, "utf-8");
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Bun.YAML types are not in @types yet
+    const parsed = (Bun as any).YAML.parse(raw) as {
+      messaging?: {
+        channels?: Array<{
+          id: string;
+          params?: Record<string, unknown>;
+        }>;
+      };
+    };
+    const channel = parsed.messaging?.channels?.find((c) => c.id === this.id);
+    if (!channel) {
+      throw new Error(
+        `channel \`${this.id}\` not found in config.yaml — whitelist write aborted`,
+      );
+    }
+    if (!channel.params) channel.params = {};
+    channel.params.allowed_user_ids = Array.from(
+      this._allowedUserOpenIds ?? [],
+    );
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Bun.YAML types are not in @types yet
+    const serialized = (Bun as any).YAML.stringify(parsed);
+    await fs.writeFile(configPath, serialized, "utf-8");
   }
 
   /**
@@ -885,6 +1085,23 @@ export class FeishuMessageChannel
         : chatType === "p2p" || chatType === "single"
           ? "single"
           : undefined;
+    // Propagate the raw Feishu mentions into a provider-agnostic list so
+    // downstream command handlers (`/group`, `/allow`) can resolve the
+    // `@_user_N` placeholders that appear in the text content.
+    const normalizedMentions: Array<{
+      key: string;
+      open_id: string;
+      name?: string;
+    }> = [];
+    for (const m of mentions ?? []) {
+      const openId = m.id?.open_id;
+      if (!openId || !m.key) continue;
+      normalizedMentions.push({
+        key: m.key,
+        open_id: openId,
+        name: m.name,
+      });
+    }
     const userMessage: UserMessage = {
       id: messageId,
       session_id,
@@ -894,6 +1111,8 @@ export class FeishuMessageChannel
       chat_type: normalizedChatType,
       thread_id: threadId,
       sender_open_id: senderOpenId,
+      mentions:
+        normalizedMentions.length > 0 ? normalizedMentions : undefined,
       content: [
         await this._parseMessageContent(
           messageId,

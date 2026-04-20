@@ -16,6 +16,7 @@ import { HonoServer } from "../server";
 
 import { CommandRegistry, parseCommand, type CardCommandResult } from "./commands";
 import { buildCommandCard } from "./commands/cards";
+import { GroupFlow } from "./group/group-flow";
 import { MultiChannelMessageGateway } from "./messaging";
 import { SessionManager } from "./sessioning";
 import * as sessioningSchema from "./sessioning/data";
@@ -41,6 +42,7 @@ class Kernel {
   private _feishuChannels = new Map<string, FeishuMessageChannel>();
   private _setupFlow!: SetupFlow;
   private _switchFlow!: SwitchFlow;
+  private _groupFlow!: GroupFlow;
 
   constructor() {
     this._initDatabase();
@@ -51,6 +53,7 @@ class Kernel {
     this._initMessageGateway();
     this._initSetupFlow();
     this._initSwitchFlow();
+    this._initGroupFlow();
     this._initServer();
   }
 
@@ -154,6 +157,14 @@ class Kernel {
     });
   }
 
+  private _initGroupFlow(): void {
+    this._groupFlow = new GroupFlow({
+      feishuChannels: this._feishuChannels,
+      setupFlow: this._setupFlow,
+      db: this._database.db,
+    });
+  }
+
   /**
    * Start the kernel.
    */
@@ -195,6 +206,14 @@ class Kernel {
     // both group chats and P2P since switching binding only touches metadata.
     if (text === "/switch") {
       await this._switchFlow.start(message);
+      return;
+    }
+
+    // Handle /group command (kernel-owned — orchestrates create-chat +
+    // transfer-owner + auto /setup). Takes args, so match the prefix rather
+    // than equality.
+    if (text === "/group" || text.startsWith("/group ")) {
+      await this._groupFlow.start(message);
       return;
     }
 
@@ -267,6 +286,7 @@ class Kernel {
         args: parsed.args,
         raw: parsed.raw,
         workspaceStore: this._workspaceStore,
+        feishuChannels: this._feishuChannels,
         logger: this._logger,
       });
       if (typeof result === "string") {

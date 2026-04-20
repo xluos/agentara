@@ -40,6 +40,22 @@ export const SystemMessage = BaseMessage.extend({
 export interface SystemMessage extends z.infer<typeof SystemMessage> {}
 
 /**
+ * A single @-mention inside an inbound message. Provider-agnostic shape —
+ * Feishu maps these from the event's `mentions` array; other channels may
+ * leave the list empty. Consumers (e.g. `/group`, `/allow`) use this to
+ * resolve `@_user_N` placeholders in the text content back to open_ids.
+ */
+export const MessageMention = z.object({
+  /** Placeholder substring in the text, e.g. `@_user_0` for Feishu. */
+  key: z.string(),
+  /** Provider-specific open_id of the mentioned user. */
+  open_id: z.string(),
+  /** Display name at event time (best-effort). */
+  name: z.string().optional(),
+});
+export interface MessageMention extends z.infer<typeof MessageMention> {}
+
+/**
  * The user message.
  */
 export const UserMessage = BaseMessage.extend({
@@ -58,6 +74,11 @@ export const UserMessage = BaseMessage.extend({
   thread_id: z.string().optional(),
   /** Provider-specific open_id of the sender (e.g. Feishu open_id). */
   sender_open_id: z.string().optional(),
+  /**
+   * @-mentions carried from the source event, in order. Empty/undefined when
+   * the channel doesn't expose mentions or when no users were @-tagged.
+   */
+  mentions: z.array(MessageMention).optional(),
   content: z.array(
     z.discriminatedUnion("type", [
       TextMessageContent,

@@ -1,5 +1,6 @@
 import type { Logger, UserMessage } from "@/shared";
 
+import type { FeishuMessageChannel } from "../../community/feishu/messaging/message-channel";
 import type { Card } from "../../community/feishu/messaging/types";
 import type { GroupWorkspaceStore } from "../workspaces";
 
@@ -19,6 +20,12 @@ export interface CommandContext {
   args: string[];
   raw: string;
   workspaceStore: GroupWorkspaceStore;
+  /**
+   * All active Feishu channels, keyed by id. Handlers that need to call SDK
+   * methods (e.g. `/ungroup` deleting a chat, `/allow` mutating the
+   * whitelist) look up the originating channel via `message.channel_id`.
+   */
+  feishuChannels: Map<string, FeishuMessageChannel>;
   logger: Logger;
 }
 

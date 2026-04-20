@@ -335,6 +335,119 @@ const checkoutHandler: CommandHandler = {
   },
 };
 
+const ungroupHandler: CommandHandler = {
+  name: "ungroup",
+  description:
+    "/ungroup [群名或 chat_id] — 解散机器人创建的群（群内无参=当前群；单聊须指定）",
+  async execute(ctx) {
+    if (!ctx.message.channel_id) {
+      return "❌ /ungroup 需要飞书会话上下文。";
+    }
+    const channel = ctx.feishuChannels.get(ctx.message.channel_id);
+    if (!channel) {
+      return "❌ 找不到对应的飞书 channel。";
+    }
+    const senderOpenId = ctx.message.sender_open_id;
+    if (!senderOpenId) {
+      return "❌ 无法识别发命令的用户。";
+    }
+    const isP2P = ctx.message.chat_type === "single";
+
+    // Decide which chat to dismiss.
+    let targetChatId: string;
+    let targetName: string;
+    if (isP2P) {
+      const query = ctx.args.join(" ").trim();
+      if (!query) {
+        return "用法：`/ungroup <群名或 chat_id>`（单聊内必须指定目标）";
+      }
+      const matches = channel.findBotGroupForCreator(query, senderOpenId);
+      if (matches.length === 0) {
+        return `❌ 没有找到你创建的群匹配 \`${query}\`。`;
+      }
+      if (matches.length > 1) {
+        const idList = matches
+          .map((m) => `- \`${m.chat_name}\` (\`${m.chat_id}\`)`)
+          .join("\n");
+        return `⚠️  有多个同名群，请用 chat_id 指定：\n${idList}`;
+      }
+      targetChatId = matches[0]!.chat_id;
+      targetName = matches[0]!.chat_name;
+    } else {
+      const chatId = ctx.message.chat_id;
+      if (!chatId) return "❌ 无法获取当前群 chat_id。";
+      const row = channel.findBotGroup(chatId);
+      if (!row) {
+        return "❌ 当前群不是机器人创建的，拒绝解散。";
+      }
+      if (row.creator_open_id !== senderOpenId) {
+        return "🚫 只有当初用 /group 建群的人才能解散它。";
+      }
+      targetChatId = row.chat_id;
+      targetName = row.chat_name;
+    }
+
+    try {
+      await channel.dismissChat(targetChatId);
+    } catch (err) {
+      ctx.logger.error(
+        { err, chat_id: targetChatId },
+        "dismissChat failed",
+      );
+      return `❌ 解散失败：${(err as Error).message}`;
+    }
+    channel.deleteBotGroupRecord(targetChatId);
+    return cardReply("解散群聊", [
+      `✅ 已解散 \`${targetName}\` (\`${targetChatId}\`)。`,
+    ]);
+  },
+};
+
+const allowHandler: CommandHandler = {
+  name: "allow",
+  description: "/allow @user1 @user2 ... — 把 @ 的人加到机器人白名单",
+  async execute(ctx) {
+    if (!ctx.message.channel_id) {
+      return "❌ /allow 需要飞书会话上下文。";
+    }
+    const channel = ctx.feishuChannels.get(ctx.message.channel_id);
+    if (!channel) {
+      return "❌ 找不到对应的飞书 channel。";
+    }
+    const senderOpenId = ctx.message.sender_open_id;
+    if (!senderOpenId) {
+      return "❌ 无法识别发命令的用户。";
+    }
+    const mentions = ctx.message.mentions ?? [];
+    // Self-mention doesn't count — adding yourself is a no-op since you
+    // clearly already passed the whitelist gate to get here.
+    const targets = Array.from(
+      new Set(
+        mentions
+          .map((m) => m.open_id)
+          .filter((id) => id && id !== senderOpenId),
+      ),
+    );
+    if (targets.length === 0) {
+      return "用法：`/allow @user1 @user2 ...`（至少 @ 一个人，不能 @ 自己）";
+    }
+    let added: string[];
+    try {
+      added = await channel.addToWhitelist(targets);
+    } catch (err) {
+      ctx.logger.error({ err, targets }, "addToWhitelist failed");
+      return `❌ 写入白名单失败：${(err as Error).message}`;
+    }
+    if (added.length === 0) {
+      return "ℹ️  所有指定用户已在白名单里，无需更新。";
+    }
+    return cardReply("白名单已更新", [
+      `✅ 新增 ${added.length} 人到白名单：`,
+      ...added.map((id) => `- \`${id}\``),
+    ]);
+  },
+};
+
 export const helpHandler: CommandHandler = {
   name: "help",
   description: "/help — 显示所有可用命令",
@@ -349,6 +462,7 @@ export const helpHandler: CommandHandler = {
             "- /stop — 取消当前 session 正在执行的任务",
             "- /setup — 打开 workspace 配置卡片（仅群聊）",
             "- /switch — 打开 workspace 切换卡片（群聊 & 单聊）",
+            "- /group <群名> @user... — 机器人建群并自动 /setup（仅单聊）",
           ],
         },
       ],
@@ -364,6 +478,8 @@ export const BUILTIN_COMMANDS: CommandHandler[] = [
   lsHandler,
   cloneHandler,
   checkoutHandler,
+  ungroupHandler,
+  allowHandler,
 ];
 
 function _formatSyncLine(r: RepoSyncResult): string {
