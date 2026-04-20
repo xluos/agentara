@@ -1,3 +1,5 @@
+import { join } from "node:path";
+
 import type { Logger } from "@/shared";
 import {
   createLogger,
@@ -6,7 +8,7 @@ import {
 } from "@/shared";
 
 import type { FeishuMessageChannel } from "../../community/feishu/messaging/message-channel";
-import type { GroupWorkspaceStore } from "../workspaces";
+import { readRepoHead, type GroupWorkspaceStore } from "../workspaces";
 
 import {
   buildSwitchCard,
@@ -101,7 +103,10 @@ export class SwitchFlow {
             workspace_name: current.workspace_name,
             workspace_path: current.workspace_path,
             active_repo: current.active_repo,
-            active_branch: current.active_branch,
+            active_branch: current.active_repo
+              ? readRepoHead(join(current.workspace_path, current.active_repo)) ??
+                null
+              : null,
           }
         : undefined,
     });
@@ -218,10 +223,16 @@ export class SwitchFlow {
     }
 
     const summary = `✅ 已切换到 workspace \`${binding.workspace_name}\`。`;
+    // Show the on-disk HEAD of the target workspace's active repo, not the
+    // stored `active_branch` — switching only rebinds; the repo keeps its
+    // current checkout.
+    const headBranch = binding.active_repo
+      ? readRepoHead(join(binding.workspace_path, binding.active_repo))
+      : undefined;
     const detail = [
       `- Workspace ID：\`${binding.workspace_id}\``,
       `- 活跃仓库：\`${binding.active_repo ?? "(未设置)"}\``,
-      `- 活跃分支：\`${binding.active_branch ?? "(未设置)"}\``,
+      `- 活跃分支：\`${headBranch ?? "(未设置)"}\``,
     ];
     await this._tryUpdateCard(
       channel,

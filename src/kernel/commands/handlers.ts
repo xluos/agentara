@@ -5,6 +5,7 @@ import { formatRepoRef } from "@/kernel/repo-ref";
 import {
   formatAheadBehind,
   listRepoSyncState,
+  readRepoHead,
   syncWorkspace,
   type RepoSyncResult,
 } from "@/kernel/workspaces";
@@ -116,7 +117,7 @@ const bindHandler: CommandHandler = {
       const activeLine = binding.active_repo
         ? `- 活跃仓库：\`${formatRepoRef(
             binding.active_repo,
-            binding.active_branch,
+            readRepoHead(join(binding.workspace_path, binding.active_repo)),
           )}\``
         : "- 活跃仓库：(未设置)";
       return cardReply("绑定 Workspace", [
@@ -189,12 +190,17 @@ const statusHandler: CommandHandler = {
     lines.push(`- Workspace ID：\`${resolution.binding.workspace_id}\``);
     lines.push(`- Workspace 名称：\`${resolution.binding.workspace_name}\``);
     const activeRepo = resolution.binding.active_repo;
-    const activeBranch = resolution.binding.active_branch;
+    const repoStates = listRepoSyncState(resolution.binding.workspace_path);
+    // Always read branch from on-disk HEAD, not the stored `active_branch`
+    // hint — the runner never force-checks-out, so "active" means "whatever
+    // the repo is currently on".
+    const activeState = activeRepo
+      ? repoStates.find((s) => s.name === activeRepo)
+      : undefined;
     const activeLabel = activeRepo
-      ? `\`${formatRepoRef(activeRepo, activeBranch)}\``
+      ? `\`${formatRepoRef(activeRepo, activeState?.branch)}\``
       : "(未设置)";
     lines.push(`- 活跃仓库：${activeLabel}`);
-    const repoStates = listRepoSyncState(resolution.binding.workspace_path);
     if (repoStates.length > 0) {
       const repoLines: string[] = [];
       for (const s of repoStates) {

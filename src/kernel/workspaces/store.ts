@@ -8,6 +8,8 @@ import type { DrizzleDB } from "@/data";
 import { groupWorkspaces, workspaces } from "@/kernel/sessioning/data";
 import { config, createLogger, uuid, type GroupWorkspace, type Workspace } from "@/shared";
 
+import { readRepoHead } from "./git-sync";
+
 const META_FILE_NAME = "AGENTARA.md";
 
 /**
@@ -227,8 +229,11 @@ export class GroupWorkspaceStore {
     const envExtras: Record<string, string> = {};
     if (binding.active_repo) {
       envExtras.DEV_ASSETS_PRIMARY_REPO = binding.active_repo;
-      if (binding.active_branch) {
-        envExtras.DEV_ASSETS_PRIMARY_BRANCH = binding.active_branch;
+      // Informational env — reflect the repo's actual HEAD, not the stored
+      // `active_branch` hint, so the agent sees what it will actually run on.
+      const head = readRepoHead(join(binding.workspace_path, binding.active_repo));
+      if (head) {
+        envExtras.DEV_ASSETS_PRIMARY_BRANCH = head;
       }
     }
     return {

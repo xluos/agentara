@@ -241,6 +241,16 @@ export function listRepoSyncState(workspacePath: string): RepoSyncState[] {
 }
 
 /**
+ * Read the current branch of a single repo (HEAD). Returns `undefined` when
+ * the repo is in a detached-HEAD state or git exits non-zero. Thin wrapper
+ * around the internal sync helper so other layers don't have to shell out
+ * themselves.
+ */
+export function readRepoHead(repoPath: string): string | undefined {
+  return _readCurrentBranchSync(repoPath);
+}
+
+/**
  * Render `↑a ↓b` for ahead/behind counts, omitting zero sides. Returns an
  * empty string when both sides are zero. Callers usually concatenate this
  * after a `repo branch` code block.

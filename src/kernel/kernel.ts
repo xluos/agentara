@@ -412,24 +412,6 @@ class Kernel {
   ) => {
     const inboundMessage = payload.message;
     const resolution = this._workspaceStore.resolve(inboundMessage.chat_id);
-    if (resolution.binding?.active_repo && resolution.binding.active_branch) {
-      // Idempotent pre-checkout so the active repo is on the bound branch
-      // before the runner spawns. Runs synchronously with the dispatch — if
-      // it fails, we still proceed (binding may need user repair).
-      try {
-        const repoPath = `${resolution.binding.workspace_path}/${resolution.binding.active_repo}`;
-        const proc = Bun.spawn(
-          ["git", "-C", repoPath, "checkout", resolution.binding.active_branch],
-          { stdout: "pipe", stderr: "pipe" },
-        );
-        await proc.exited;
-      } catch (err) {
-        this._logger.warn(
-          { err, chat_id: inboundMessage.chat_id, binding: resolution.binding },
-          "pre-dispatch git checkout failed; continuing",
-        );
-      }
-    }
     const session = await this._sessionManager.resolveSession(sessionId, {
       channelId: inboundMessage.channel_id,
       chatId: inboundMessage.chat_id,
