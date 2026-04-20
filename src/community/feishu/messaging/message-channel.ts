@@ -829,8 +829,16 @@ export class FeishuMessageChannel
       messageType,
       receivedMessage.content,
     );
+    // Messages inside a thread the bot has already engaged in are implicitly
+    // directed at the bot — no need to @-mention again. The `feishu_threads`
+    // table tracks every thread the bot has participated in (either by
+    // starting it via reply/post, or by being @-mentioned into it earlier).
+    const isInBotThread = this._isInBotThread(threadId);
     const mentionEnforced =
-      this._requireMention && chatType === "group" && !isSlashCommand;
+      this._requireMention &&
+      chatType === "group" &&
+      !isSlashCommand &&
+      !isInBotThread;
     const isBotMentioned =
       !!this._botOpenId &&
       !!mentions?.some((m) => m.id?.open_id === this._botOpenId);
@@ -845,6 +853,7 @@ export class FeishuMessageChannel
         sender_open_id: senderOpenId,
         bot_mentioned: isBotMentioned,
         slash_command: isSlashCommand,
+        in_bot_thread: isInBotThread,
         passed: isAllowedSender && mentionOk,
       },
       "inbound message",
@@ -973,6 +982,28 @@ export class FeishuMessageChannel
   };
 
   private _threadIdToSessionId = new Map<string, string>();
+
+  /**
+   * Returns true if `threadId` belongs to a thread the bot has engaged in
+   * before (either by starting it via reply/post, or by being @-mentioned
+   * into it). Used to bypass the @-mention requirement for follow-up
+   * messages inside a bot-owned topic. Cheap: in-memory cache first, then
+   * indexed single-row lookup on `feishu_threads`.
+   */
+  private _isInBotThread(threadId: string | undefined): boolean {
+    if (!threadId) return false;
+    if (this._threadIdToSessionId.has(threadId)) return true;
+    const row = this._db
+      .select({ session_id: feishuThreads.session_id })
+      .from(feishuThreads)
+      .where(eq(feishuThreads.thread_id, threadId))
+      .get();
+    if (row) {
+      this._threadIdToSessionId.set(threadId, row.session_id);
+      return true;
+    }
+    return false;
+  }
 
   /** Persist a thread→session mapping to DB and update the in-memory cache. */
   private _mapThreadToSession(threadId: string, sessionId: string) {
