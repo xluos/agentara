@@ -2,6 +2,10 @@ import { FeishuMessageChannel } from "@/community/feishu";
 import * as feishuMessagingSchema from "@/community/feishu/messaging/data";
 import type { Card } from "@/community/feishu/messaging/types";
 import { DataConnection } from "@/data";
+// Side-effect import: every module under `src/plugins/*` registers its
+// runner with the registry at load time. This must happen before any
+// session dispatch so `agents.default.type` can resolve plugin types.
+import "@/plugins";
 import type { AssistantMessage, CardActionPayload, UserMessage } from "@/shared";
 import {
   config,
