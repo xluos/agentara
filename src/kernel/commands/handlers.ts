@@ -433,7 +433,7 @@ const allowHandler: CommandHandler = {
     }
     let added: string[];
     try {
-      added = await channel.addToWhitelist(targets);
+      added = await channel.addToWhitelist(targets, senderOpenId);
     } catch (err) {
       ctx.logger.error({ err, targets }, "addToWhitelist failed");
       return `❌ 写入白名单失败：${(err as Error).message}`;

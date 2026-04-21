@@ -413,14 +413,29 @@ export class FeishuMessageChannel
    * on the very next inbound message without a restart. Persistence keeps
    * the change across restarts; we re-use Bun's YAML parser/stringifier so
    * the file stays round-trippable.
+   *
+   * `senderOpenId` is required so we can auto-seed the operator into the
+   * whitelist when transitioning from the implicit "everyone allowed" state
+   * (no whitelist configured) to an explicit list. Without this seed, a
+   * freshly-initialized whitelist would exclude the very user who just ran
+   * `/allow`, locking them out of their own bot on the next message.
    */
-  async addToWhitelist(openIds: string[]): Promise<string[]> {
+  async addToWhitelist(
+    openIds: string[],
+    senderOpenId: string,
+  ): Promise<string[]> {
+    const hadWhitelist = !!this._allowedUserOpenIds;
     if (!this._allowedUserOpenIds) {
-      // The whitelist was disabled (empty set accepts everyone). Initialize
-      // a fresh one — the newly-added users become the whole allow-list.
       this._allowedUserOpenIds = new Set<string>();
     }
     const added: string[] = [];
+    // Bootstrap guard: the previous state allowed everyone implicitly.
+    // Preserve access for the operator when we materialize that into an
+    // explicit list.
+    if (!hadWhitelist && !this._allowedUserOpenIds.has(senderOpenId)) {
+      this._allowedUserOpenIds.add(senderOpenId);
+      added.push(senderOpenId);
+    }
     for (const openId of openIds) {
       if (!this._allowedUserOpenIds.has(openId)) {
         this._allowedUserOpenIds.add(openId);
@@ -1071,6 +1086,37 @@ export class FeishuMessageChannel
     }
   }
 
+  /**
+   * Post a short plain-text reply when an inbound message is dropped by a
+   * gate (whitelist / mention enforcement). Only used for messages whose
+   * intent is clearly directed at the bot — otherwise the bot would spam
+   * rejection replies at every unrelated group message.
+   */
+  private async _replyRejection(
+    messageId: string,
+    reason: "whitelist" | "mention",
+  ): Promise<void> {
+    const text =
+      reason === "whitelist"
+        ? "❌ 未授权：你不在本机器人白名单。请让已授权的成员用 `/allow @你` 把你加入。"
+        : "❌ 本群需要 @ 机器人才能触发对话（`/` 斜杠命令除外）。";
+    try {
+      await this._client.im.message.reply({
+        path: { message_id: messageId },
+        data: {
+          msg_type: "text",
+          content: JSON.stringify({ text }),
+          reply_in_thread: false,
+        },
+      });
+    } catch (err) {
+      this._logger.warn(
+        { err, message_id: messageId, reason },
+        "failed to send rejection reply",
+      );
+    }
+  }
+
   private async _replyUpdateFailureMessage(messageId: string): Promise<void> {
     try {
       await this._client.im.message.reply({
@@ -1157,11 +1203,25 @@ export class FeishuMessageChannel
       "inbound message",
     );
 
+    // A message is "directed at the bot" if the intent is unambiguous — slash
+    // command, explicit @-mention, inside a thread the bot already owns, or a
+    // p2p chat. We only surface rejection replies for these; casual group
+    // chatter from non-whitelisted members gets silently dropped to avoid
+    // spamming the chat.
+    const isIntendedForBot =
+      isSlashCommand ||
+      isBotMentioned ||
+      isInBotThread ||
+      chatType === "p2p";
+
     if (!isAllowedSender) {
       this._logger.info(
         { message_id: messageId, sender_open_id: senderOpenId },
         "dropping inbound: sender not in whitelist",
       );
+      if (isIntendedForBot) {
+        await this._replyRejection(messageId, "whitelist");
+      }
       return;
     }
     if (!mentionOk) {
@@ -1169,6 +1229,8 @@ export class FeishuMessageChannel
         { message_id: messageId, chat_id: chatId },
         "dropping inbound: bot not @mentioned in group chat",
       );
+      // `mentionEnforced` already excludes slash_command / in_bot_thread, so
+      // reaching here means the message has no directed signal. Stay silent.
       return;
     }
 
