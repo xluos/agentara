@@ -24,24 +24,48 @@ import type {
 } from "./types";
 
 /**
- * Maximum step-panel elements per card. A single Feishu container is capped
- * at 50 elements server-side (error 11310 `element exceeds the limit`); we
- * keep cards well under that for UX breathing room and let the channel
- * spill overflow into a follow-up card instead of truncating.
+ * Maximum step-panel elements per card. A single Feishu container is
+ * capped at 50 server-side (error 11310 `element exceeds the limit`); we
+ * keep cards well under that so long runs don't get rejected. The panel
+ * shows the most recent N-1 steps plus a single "… K earlier steps" row
+ * pinned at the top when the true count exceeds this cap.
  */
 export const MAX_STEPS_PER_CARD = 25;
 
 /**
- * Per-card step-panel byte budget used by the content splitter.
- *
- * Feishu caps a card's JSON `content` field at ~30 KB. Subtract the card
- * wrapper (config/header/summary/collapsible shell ≈ 1 KB), the trailing
- * "more" indicator, and leave headroom for the final markdown text block
- * on the last card — 20 KB for step elements keeps every split chunk
- * comfortably under the hard ceiling while avoiding chopping on short
- * natural-size steps.
+ * Per-step text clip length. Agent output frequently contains huge Bash
+ * descriptions or multi-KB thinking traces; displayed as-is they'd push
+ * the card past Feishu's 30 KB body cap on their own. Each step's text
+ * is truncated to at most this many characters (first line only) so the
+ * panel stays legible — the full payload is always preserved in the
+ * session jsonl for post-hoc inspection.
  */
-export const MAX_STEP_PANEL_BYTES_PER_CARD = 20 * 1024;
+export const MAX_STEP_TEXT_CHARS = 200;
+
+/**
+ * Byte budget for a single card's markdown text block. Above this we
+ * spill the overflow into follow-up text-only cards.
+ *
+ * Feishu's content ceiling is 30 KB. Budget breakdown on a fully
+ * populated card:
+ *   - card wrapper (config, body shell, headers): ~800 bytes
+ *   - step panel with 25 rows, per-step text clipped to 200 chars,
+ *     Chinese-filled worst case: ~8–10 KB (ASCII-heavy: ~5 KB)
+ *   - markdown block (in body.elements AND a short summary preview):
+ *     headroom → up to ~20 KB here
+ *
+ * The summary preview is intentionally short (see `_summarizeMarkdown`
+ * below) so we're not double-paying the markdown bytes.
+ */
+export const MAX_MARKDOWN_BYTES_PER_CHUNK = 20 * 1024;
+
+/**
+ * Max summary length (characters) shown in the Feishu notification /
+ * chat-list preview. Kept tiny — the full message lives in the body
+ * element; duplicating the whole markdown here would double the card's
+ * byte cost for no visible gain.
+ */
+const _SUMMARY_PREVIEW_CHARS = 180;
 
 /**
  * Render assistant message content as a Feishu interactive card.
@@ -54,19 +78,10 @@ export async function renderMessageCard(
   {
     streaming,
     uploadImage,
-    totalStepCount,
   }: {
     streaming: boolean;
     // eslint-disable-next-line no-unused-vars
     uploadImage: (path: string) => Promise<string>;
-    /**
-     * Grand total of steps across the whole card chain. When rendering a
-     * chunk that is only a slice of the real step list (the channel is
-     * splitting an overflowing message into multiple cards), the chunk's
-     * own element count understates progress; pass the true total here so
-     * the "Working on it (N steps)" header stays accurate.
-     */
-    totalStepCount?: number;
   },
 ): Promise<Card> {
   const stepPanel: CollapsiblePanel = {
@@ -117,7 +132,11 @@ export async function renderMessageCard(
       _renderTool(content, stepPanel);
     }
   }
-  const headerStepCount = totalStepCount ?? stepPanel.elements.length;
+  // Capture the real step count *before* we drop oldest rows to fit the
+  // card — the header wants to show overall progress, not the windowed
+  // view size.
+  const trueStepCount = stepPanel.elements.length;
+  _truncateStepPanel(stepPanel);
   if (!streaming) {
     // Find the last text block (final response), not all text blocks
     const lastTextContent = messageContent.findLast((c) => c.type === "text");
@@ -132,14 +151,14 @@ export async function renderMessageCard(
         tag: "markdown",
         content: markdownContent,
       };
-      card.config!.summary.content = markdownContent;
+      card.config!.summary.content = _summarizeMarkdown(markdownContent);
       card.body.elements.push(resultElement);
     }
   }
 
-  if (stepPanel.elements.length > 0) {
+  if (trueStepCount > 0) {
     const stepCountText =
-      headerStepCount + " " + (headerStepCount === 1 ? "step" : "steps");
+      trueStepCount + " " + (trueStepCount === 1 ? "step" : "steps");
     if (streaming) {
       stepPanel.header.title.content = `Working on it (${stepCountText})`;
       card.config!.summary.content = `Working on it (${stepCountText})`;
@@ -330,103 +349,58 @@ function _renderTool(
 }
 
 /**
- * Approximate the JSON byte footprint a step-emitting block will cost
- * inside the step panel. Used purely for pre-flight splitting decisions —
- * accuracy within ±20% is enough; we just need to avoid chunks that
- * would blow past Feishu's 30 KB content cap on long Bash commands or
- * dense thinking traces.
- *
- * The 220-byte base covers the div / icon / plain_text wrapper JSON the
- * renderer stamps around each step.
+ * Drop oldest rows from the step panel when the true step count exceeds
+ * Feishu's safe container size. Keeps the most recent
+ * `MAX_STEPS_PER_CARD - 1` rows and prepends a single summary row like
+ * `… 42 earlier steps` so the user sees both what just happened and
+ * how much came before it.
  */
-function _estimateStepByteCost(block: AssistantMessage["content"][number]): number {
-  return JSON.stringify(block).length + 220;
+function _truncateStepPanel(stepPanel: CollapsiblePanel): void {
+  const total = stepPanel.elements.length;
+  if (total <= MAX_STEPS_PER_CARD) return;
+  const kept = MAX_STEPS_PER_CARD - 1;
+  const dropped = total - kept;
+  const tail = stepPanel.elements.slice(-kept);
+  stepPanel.elements = [
+    _renderStep(`… ${dropped} earlier steps`, "more_outlined"),
+    ...tail,
+  ];
 }
 
 /**
- * Split an assistant message's content across multiple cards when it has
- * too many step-emitting blocks (thinking + tool_use) — or too many
- * bytes' worth — to fit in one Feishu container. Each returned chunk is
- * itself a valid input for {@link renderMessageCard}.
- *
- * Rules:
- *  - Thinking / tool_use blocks are distributed in their original order
- *    across chunks. A chunk closes when the next step would push either
- *    its element count past `maxSteps` or its estimated rendered bytes
- *    past `maxBytes`. A single oversized step still gets its own chunk
- *    (we never drop content).
- *  - Text blocks (final answer / narration) never count toward either
- *    cap; they're all attached to the LAST chunk so the conversational
- *    reply lands on the active card, not buried mid-chain.
- *  - If content fits in a single card by both metrics, returns
- *    `[content]` unchanged.
- *
- * Returns at least one chunk — an empty input yields `[[]]`.
+ * Build a short preview of the final markdown for `config.summary.content`
+ * (Feishu notifications / chat list snippet). Keep it tight — the full
+ * markdown is already in body.elements, so duplicating it here just
+ * doubles the card's byte cost for no visible benefit.
  */
-export function splitMessageContentForCards(
-  content: AssistantMessage["content"],
-  {
-    maxSteps = MAX_STEPS_PER_CARD,
-    maxBytes = MAX_STEP_PANEL_BYTES_PER_CARD,
-  }: { maxSteps?: number; maxBytes?: number } = {},
-): AssistantMessage["content"][] {
-  const stepBlocks = content.filter(
-    (c) => c.type === "thinking" || c.type === "tool_use",
-  );
-  const nonStepBlocks = content.filter(
-    (c) => c.type !== "thinking" && c.type !== "tool_use",
-  );
-
-  // Fast path: small enough to fit on a single card. Bytes are estimated
-  // up-front so we skip walking the list when we're well under budget.
-  if (stepBlocks.length <= maxSteps) {
-    let totalBytes = 0;
-    for (const b of stepBlocks) totalBytes += _estimateStepByteCost(b);
-    if (totalBytes <= maxBytes) {
-      return [content];
-    }
+function _summarizeMarkdown(markdown: string): string {
+  const trimmed = markdown.trim();
+  if (trimmed.length === 0) return "";
+  const firstLineEnd = trimmed.indexOf("\n");
+  const firstLine = firstLineEnd === -1 ? trimmed : trimmed.slice(0, firstLineEnd);
+  if (firstLine.length <= _SUMMARY_PREVIEW_CHARS) {
+    return firstLineEnd === -1 ? firstLine : firstLine + " …";
   }
-
-  const chunks: AssistantMessage["content"][] = [];
-  let current: AssistantMessage["content"] = [];
-  let currentBytes = 0;
-  for (const block of stepBlocks) {
-    const blockBytes = _estimateStepByteCost(block);
-    const overflow =
-      current.length >= maxSteps ||
-      (current.length > 0 && currentBytes + blockBytes > maxBytes);
-    if (overflow) {
-      chunks.push(current);
-      current = [];
-      currentBytes = 0;
-    }
-    current.push(block);
-    currentBytes += blockBytes;
-  }
-  if (current.length > 0 || chunks.length === 0) {
-    chunks.push(current);
-  }
-
-  // Final answer / text narration belongs on the LAST card — a user
-  // scrolling the thread expects the reply next to the "live" card, not
-  // frozen in the middle of the chain.
-  if (nonStepBlocks.length > 0) {
-    chunks[chunks.length - 1]!.push(
-      ...(nonStepBlocks as AssistantMessage["content"]),
-    );
-  }
-  return chunks;
+  return firstLine.slice(0, _SUMMARY_PREVIEW_CHARS - 1) + "…";
 }
 
-/** Count step-emitting blocks (thinking + tool_use) across content. */
-export function countStepBlocks(content: AssistantMessage["content"]): number {
-  let n = 0;
-  for (const c of content) {
-    if (c.type === "thinking" || c.type === "tool_use") {
-      n++;
-    }
+/**
+ * Clip a step's display text so the panel stays legible even when the
+ * underlying tool use carries a huge Bash command or a multi-KB thinking
+ * trace. Takes the first line (up to `maxChars`) and appends an ellipsis
+ * when anything was dropped.
+ */
+function _clipStepText(
+  text: string,
+  maxChars: number = MAX_STEP_TEXT_CHARS,
+): string {
+  const firstLineEnd = text.indexOf("\n");
+  const firstLine = firstLineEnd === -1 ? text : text.slice(0, firstLineEnd);
+  const hadMoreLines = firstLineEnd !== -1;
+  if (firstLine.length <= maxChars) {
+    return hadMoreLines ? firstLine + " …" : firstLine;
   }
-  return n;
+  return firstLine.slice(0, maxChars - 1) + "…";
 }
 
 /** Create a step element (icon + text) for the collapsible panel. */
@@ -442,7 +416,7 @@ function _renderStep(text: string, iconToken: string): DivElement {
       tag: "plain_text",
       text_color: "grey",
       text_size: "notation",
-      content: text,
+      content: _clipStepText(text),
     },
   };
 }
@@ -511,4 +485,84 @@ export function splitMarkdownByTables(
   }
 
   return chunks;
+}
+
+/**
+ * Split markdown into byte-bounded chunks so a single final answer
+ * doesn't overflow Feishu's 30 KB card body. Splits are preferred at
+ * paragraph boundaries (blank lines) to keep chunks readable; if a
+ * single paragraph is itself larger than `maxBytes`, falls back to line
+ * boundaries, then to a hard character slice as last resort.
+ *
+ * The returned chunks together reproduce the input verbatim, with
+ * inter-chunk whitespace trimmed at the split points.
+ */
+export function splitMarkdownByBytes(
+  markdown: string,
+  maxBytes: number = MAX_MARKDOWN_BYTES_PER_CHUNK,
+): string[] {
+  if (Buffer.byteLength(markdown, "utf8") <= maxBytes) {
+    return [markdown];
+  }
+  const chunks: string[] = [];
+  let current = "";
+  const flush = () => {
+    if (current.trim().length > 0) chunks.push(current.trim());
+    current = "";
+  };
+  const appendWithSeparator = (piece: string, sep: string) => {
+    const combined = current ? current + sep + piece : piece;
+    if (Buffer.byteLength(combined, "utf8") <= maxBytes) {
+      current = combined;
+    } else {
+      flush();
+      if (Buffer.byteLength(piece, "utf8") <= maxBytes) {
+        current = piece;
+      } else {
+        // Piece itself is oversized — emit as-is so no content is lost.
+        // Callers should expect this chunk to be over budget; downstream
+        // Feishu may still reject it, but that's a degenerate case worth
+        // surfacing as-is rather than silently dropping.
+        chunks.push(piece);
+        current = "";
+      }
+    }
+  };
+
+  const paragraphs = markdown.split(/\n\s*\n/);
+  for (const para of paragraphs) {
+    if (Buffer.byteLength(para, "utf8") <= maxBytes) {
+      appendWithSeparator(para, "\n\n");
+      continue;
+    }
+    // Paragraph itself too big — fall back to splitting by line.
+    flush();
+    const lines = para.split("\n");
+    for (const line of lines) {
+      appendWithSeparator(line, "\n");
+    }
+  }
+  flush();
+  return chunks;
+}
+
+/**
+ * Compose markdown splitters: first enforce the table-per-card cap
+ * (Feishu renders at most 5 table components), then enforce the byte
+ * cap per chunk. Result is a flat list of markdown strings each
+ * individually safe to put on a single Feishu card.
+ */
+export function splitMarkdownForCards(
+  markdown: string,
+  {
+    maxTables = 5,
+    maxBytes = MAX_MARKDOWN_BYTES_PER_CHUNK,
+  }: { maxTables?: number; maxBytes?: number } = {},
+): string[] {
+  const tableChunks = splitMarkdownByTables(markdown, maxTables);
+  const out: string[] = [];
+  for (const chunk of tableChunks) {
+    out.push(...splitMarkdownByBytes(chunk, maxBytes));
+  }
+  return out;
 }
