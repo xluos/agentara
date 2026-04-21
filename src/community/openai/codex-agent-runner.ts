@@ -75,6 +75,7 @@ export class CodexAgentRunner implements AgentRunner {
       cwd: options.cwd,
       env: {
         ...Bun.env,
+        ...config.agents.env,
         ...isolationEnv,
         ...(options.envExtras ?? {}),
       },

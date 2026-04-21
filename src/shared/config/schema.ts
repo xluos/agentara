@@ -28,10 +28,17 @@ export interface CodexConfig extends z.infer<typeof CodexConfig> {}
 
 /**
  * Configuration for all agents.
+ *
+ * `env` is merged into every agent spawn's environment — both Claude and
+ * Codex. Use it to inject static variables the host shell wouldn't provide
+ * (proxy settings, custom certs, feature flags). It sits between `Bun.env`
+ * and per-dispatch `envExtras` in the precedence chain, so workspace-level
+ * overrides still win and the host env stays the baseline.
  */
 export const AgentsConfig = z.object({
   default: AgentConfig,
   codex: CodexConfig.default({ isolate_host_env: false }),
+  env: z.record(z.string(), z.string()).default({}),
 });
 export interface AgentsConfig extends z.infer<typeof AgentsConfig> {}
 
