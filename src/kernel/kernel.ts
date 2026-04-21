@@ -136,6 +136,12 @@ class Kernel {
             allowedOpenIds.length > 0 ? allowedOpenIds : undefined,
           allowedUserEmails:
             allowedEmails.length > 0 ? allowedEmails : undefined,
+          // Uploads and quoted-resource downloads land inside the workspace
+          // the chat is currently bound to, so each chat's artifacts stay
+          // co-located with its session instead of piling up in a shared
+          // `$AGENTARA_HOME/workspace/uploads` pool.
+          resolveWorkspaceCwd: (chatId) =>
+            this._workspaceStore.resolve(chatId).cwd,
         },
         this._database.db,
       );

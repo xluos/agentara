@@ -61,6 +61,16 @@ export class FeishuMessageChannel
   private _inboundClient: WSClient;
   private _client: Client;
   private _db: DrizzleDB;
+  /**
+   * Optional workspace resolver injected by the kernel. Given a Feishu
+   * `chat_id`, returns the absolute cwd of the workspace bound to that
+   * chat (or the default workspace when unbound). Used as the download
+   * root for user-uploaded files & quoted resources so each bound chat
+   * keeps its artifacts inside its own workspace instead of a global
+   * pool.
+   */
+  // eslint-disable-next-line no-unused-vars
+  private _resolveWorkspaceCwd?: (chatId: string | undefined) => string;
   private _failedCardUpdateMessages = new Set<string>();
   /**
    * Primary message ids for which we've already posted the final
@@ -103,6 +113,8 @@ export class FeishuMessageChannel
       requireMention?: boolean;
       allowedUserOpenIds?: string[];
       allowedUserEmails?: string[];
+      // eslint-disable-next-line no-unused-vars
+      resolveWorkspaceCwd?: (chatId: string | undefined) => string;
     },
     db: DrizzleDB,
   ) {
@@ -114,6 +126,7 @@ export class FeishuMessageChannel
     this._db = db;
     this._logger = createLogger("feishu-message-channel");
     this._requireMention = !!config.requireMention;
+    this._resolveWorkspaceCwd = config.resolveWorkspaceCwd;
     if (config.allowedUserOpenIds && config.allowedUserOpenIds.length > 0) {
       this._allowedUserOpenIds = new Set(config.allowedUserOpenIds);
     }
@@ -759,7 +772,9 @@ export class FeishuMessageChannel
    * @returns The key of the uploaded image.
    */
   async uploadImage(path: string): Promise<string> {
-    const absPath = nodePath.join(config.paths.home, path);
+    const absPath = nodePath.isAbsolute(path)
+      ? path
+      : nodePath.join(config.paths.home, path);
     const file = fs.readFileSync(absPath);
     this._logger.info(`Uploading image ${absPath}`);
     const res = await this._client.im.v1.image.create({
@@ -780,11 +795,14 @@ export class FeishuMessageChannel
 
   /**
    * Uploads a file to Feishu. Returns the key of the uploaded file.
-   * @param filePath - The path to the file relative to the home directory.
+   * @param filePath - Absolute path, or a path relative to the home
+   *   directory (legacy agent-generated markdown links).
    * @returns The key of the uploaded file.
    */
   async uploadFile(filePath: string): Promise<string> {
-    const absPath = nodePath.join(config.paths.home, filePath);
+    const absPath = nodePath.isAbsolute(filePath)
+      ? filePath
+      : nodePath.join(config.paths.home, filePath);
     const file = fs.createReadStream(absPath);
     const fileName = nodePath.basename(absPath);
     const ext = nodePath.extname(absPath).slice(1).toLowerCase();
@@ -825,14 +843,20 @@ export class FeishuMessageChannel
    * Downloads an image or a file from a message.
    * @param messageId - The ID of the message to download the resource from.
    * @param file_key - The key of the file to download.
-   * @param file_name - The name of the file to download. If not provided, the file name will be inferred from the file key.
-   * @returns The path to the downloaded file.
+   * @param options.file_name - Optional file name; inferred from metadata
+   *   when omitted.
+   * @param options.targetDir - Absolute root directory for the download.
+   *   Defaults to the global `$AGENTARA_HOME/workspace/uploads` when
+   *   unspecified. Channel callers pass the per-chat workspace cwd so
+   *   uploads land inside the workspace that triggered them.
+   * @returns Absolute path to the downloaded file.
    */
   async downloadMessageResource(
     messageId: string,
     file_key: string,
-    file_name?: string,
+    options?: { file_name?: string; targetDir?: string },
   ): Promise<string> {
+    const { file_name, targetDir } = options ?? {};
     const { writeFile, headers } = await this._client.im.v1.messageResource.get(
       {
         path: {
@@ -851,7 +875,10 @@ export class FeishuMessageChannel
       Mime: string;
     };
     const isImage = metadata.Mime.startsWith("image/");
-    let dir = config.paths.uploads;
+    const root = targetDir
+      ? nodePath.join(targetDir, "uploads")
+      : config.paths.uploads;
+    let dir = root;
     if (isImage) {
       dir = nodePath.join(dir, "images");
     }
@@ -881,8 +908,13 @@ export class FeishuMessageChannel
       filename += `-${i}`;
     }
     filename += extname;
-    await writeFile(nodePath.join(dir, filename));
-    return nodePath.relative(config.paths.home, nodePath.join(dir, filename));
+    const absPath = nodePath.join(dir, filename);
+    await writeFile(absPath);
+    // Return an absolute path. Claude Code's cwd is the per-group
+    // workspace dir (`$AGENTARA_HOME/workspaces/<id>/`), not
+    // `$AGENTARA_HOME`, so a path relative to HOME would fail to
+    // resolve inside the agent's read tools.
+    return absPath;
   }
 
   /**
@@ -971,11 +1003,11 @@ export class FeishuMessageChannel
     let match: RegExpExecArray | null;
     while ((match = linkRegex.exec(text)) !== null) {
       const filePath = match[1];
-      if (
-        filePath &&
-        !filePath.includes("://") &&
-        fs.existsSync(nodePath.join(config.paths.home, filePath))
-      ) {
+      if (!filePath || filePath.includes("://")) continue;
+      const absPath = nodePath.isAbsolute(filePath)
+        ? filePath
+        : nodePath.join(config.paths.home, filePath);
+      if (fs.existsSync(absPath)) {
         paths.push(filePath);
       }
     }
@@ -1084,6 +1116,7 @@ export class FeishuMessageChannel
       chat_id: chatId,
       chat_type: chatType,
       message_type: messageType,
+      parent_id: parentId,
       mentions,
     } = receivedMessage;
     const senderOpenId = sender?.sender_id?.open_id;
@@ -1188,6 +1221,33 @@ export class FeishuMessageChannel
         name: m.name,
       });
     }
+    // Per-chat download root so files land inside the workspace that
+    // actually triggered them. Falls back to the global uploads dir when
+    // the kernel didn't wire a resolver (tests, legacy callers).
+    const targetDir = this._resolveWorkspaceCwd
+      ? this._resolveWorkspaceCwd(chatId)
+      : undefined;
+
+    const content: UserMessage["content"] = [];
+    // When the user reply-quoted an earlier message AND the new message
+    // is directed at the bot, surface the quoted context so Claude can
+    // see what they're actually pointing at. Skip when it's just an
+    // in-thread reply with no explicit quote signal to the bot.
+    if (parentId && isIntendedForBot) {
+      const info = await this._fetchQuotedMessage(parentId, targetDir);
+      content.push({
+        type: "text",
+        text: _formatQuotedBlock(info, parentId),
+      });
+    }
+    content.push(
+      await this._parseMessageContent(
+        messageId,
+        receivedMessage.message_type,
+        receivedMessage.content,
+        targetDir,
+      ),
+    );
     const userMessage: UserMessage = {
       id: messageId,
       session_id,
@@ -1199,13 +1259,7 @@ export class FeishuMessageChannel
       sender_open_id: senderOpenId,
       mentions:
         normalizedMentions.length > 0 ? normalizedMentions : undefined,
-      content: [
-        await this._parseMessageContent(
-          messageId,
-          receivedMessage.message_type,
-          receivedMessage.content,
-        ),
-      ],
+      content,
     };
     this.emit("message:inbound", userMessage);
   };
@@ -1363,10 +1417,124 @@ export class FeishuMessageChannel
     return uuid();
   }
 
+  /**
+   * Pull the message the user reply-quoted so Claude can see what the new
+   * message is actually *about*. Returns a normalized `QuotedInfo` or
+   * `null` if the message can't be read (recalled, permission missing,
+   * network error) — callers should render a "消息已撤回或无法读取"
+   * placeholder in that case, not pretend the quote wasn't there.
+   */
+  private async _fetchQuotedMessage(
+    parentId: string,
+    targetDir?: string,
+  ): Promise<_QuotedInfo | null> {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- SDK types are thin here
+      const res = await (this._client.im.message as any).get({
+        path: { message_id: parentId },
+      });
+      const item = res?.data?.items?.[0] as
+        | {
+            msg_type?: string;
+            create_time?: string;
+            sender?: { id?: string; id_type?: string };
+            body?: { content?: string };
+          }
+        | undefined;
+      if (!item) return null;
+      const msgType = item.msg_type ?? "unknown";
+      const createdAt = item.create_time
+        ? Number(item.create_time)
+        : undefined;
+      const senderOpenId =
+        item.sender?.id_type === "open_id" ? item.sender.id : undefined;
+      const text = await this._extractQuotedText(
+        parentId,
+        msgType,
+        item.body?.content ?? "{}",
+        targetDir,
+      );
+      return {
+        message_id: parentId,
+        message_type: msgType,
+        sender_open_id: senderOpenId,
+        created_at: createdAt,
+        text,
+      };
+    } catch (err) {
+      this._logger.warn(
+        { err, message_id: parentId },
+        "failed to fetch quoted message",
+      );
+      return null;
+    }
+  }
+
+  /**
+   * Reduce a quoted message to a single text representation. Text/post
+   * get extracted verbatim; opaque types (image, file, card, sticker…)
+   * get a human-readable placeholder so Claude can still reason about
+   * "what did the user point at" without needing to download the asset.
+   */
+  private async _extractQuotedText(
+    messageId: string,
+    type: string,
+    rawContent: string,
+    targetDir?: string,
+  ): Promise<string> {
+    let json: Record<string, unknown>;
+    try {
+      json = JSON.parse(rawContent) as Record<string, unknown>;
+    } catch {
+      return "[无法解析的消息内容]";
+    }
+    if (type === "text") {
+      return typeof json.text === "string" ? json.text : "";
+    }
+    if (type === "post") {
+      try {
+        return await convertPostToMarkdown(json, (file_key) =>
+          this.downloadMessageResource(messageId, file_key, { targetDir }),
+        );
+      } catch {
+        return "[富文本消息]";
+      }
+    }
+    if (type === "image") {
+      // Download + embed as markdown image so Claude Code's multimodal
+      // pipeline picks it up, same way a directly-uploaded image works.
+      try {
+        const fileKey =
+          typeof json.image_key === "string" ? json.image_key : null;
+        if (!fileKey) return "[图片]";
+        const path = await this.downloadMessageResource(messageId, fileKey, {
+          targetDir,
+        });
+        return `![quoted_image](${path})`;
+      } catch (err) {
+        this._logger.warn(
+          { err, message_id: messageId },
+          "failed to download quoted image",
+        );
+        return "[图片(下载失败)]";
+      }
+    }
+    if (type === "file") {
+      const name = typeof json.file_name === "string" ? json.file_name : "";
+      return name ? `[文件: ${name}]` : "[文件]";
+    }
+    if (type === "audio") return "[语音]";
+    if (type === "media") return "[视频]";
+    if (type === "sticker") return "[表情]";
+    if (type === "interactive") return "[卡片]";
+    return `[${type} 消息]`;
+  }
+
   private async _parseMessageContent(
     messageId: string,
     type: string,
     content: string,
+    targetDir?: string,
   ): Promise<TextMessageContent> {
     const json = JSON.parse(content);
     if (type === "text") {
@@ -1375,9 +1543,8 @@ export class FeishuMessageChannel
         text: json.text,
       };
     } else if (type === "post") {
-      const markdown = await convertPostToMarkdown(
-        json,
-        this.downloadMessageResource.bind(this, messageId),
+      const markdown = await convertPostToMarkdown(json, (file_key) =>
+        this.downloadMessageResource(messageId, file_key, { targetDir }),
       );
       return {
         type: "text",
@@ -1385,7 +1552,9 @@ export class FeishuMessageChannel
       };
     } else if (type === "image") {
       const file_key = json.image_key as string;
-      const path = await this.downloadMessageResource(messageId, file_key);
+      const path = await this.downloadMessageResource(messageId, file_key, {
+        targetDir,
+      });
       return {
         type: "text",
         text: `![user_uploaded_image](${path})`,
@@ -1393,11 +1562,10 @@ export class FeishuMessageChannel
     } else if (type === "file") {
       const file_key = json.file_key as string;
       const file_name = json.file_name as string;
-      const path = await this.downloadMessageResource(
-        messageId,
-        file_key,
+      const path = await this.downloadMessageResource(messageId, file_key, {
         file_name,
-      );
+        targetDir,
+      });
       return {
         type: "text",
         text: `A new file message uploaded to \`${path}\``,
@@ -1407,6 +1575,77 @@ export class FeishuMessageChannel
       return { type: "text", text: "Unsupported message type" + type };
     }
   }
+}
+
+/**
+ * Normalized shape of a reply-quoted Feishu message, ready to format
+ * into a `<quoted_message>` block.
+ */
+interface _QuotedInfo {
+  message_id: string;
+  message_type: string;
+  sender_open_id?: string;
+  created_at?: number;
+  text: string;
+}
+
+/** Max characters of quoted text surfaced to Claude. */
+const _QUOTED_TEXT_MAX_CHARS = 500;
+
+/**
+ * Format a quoted message as a structured `<quoted_message>` block the
+ * agent can reason about. Pass `null` to render a "revoked / unreadable"
+ * placeholder block — the agent still sees that a quote existed, which
+ * is better than silently dropping the signal.
+ */
+function _formatQuotedBlock(
+  info: _QuotedInfo | null,
+  parentId?: string,
+): string {
+  if (info === null) {
+    const idAttr = parentId ? ` id="${_escapeAttr(parentId)}"` : "";
+    return (
+      `<quoted_message${idAttr} status="unavailable">\n` +
+      `[该消息已撤回或无法读取]\n` +
+      `</quoted_message>`
+    );
+  }
+  const attrs: string[] = [
+    `id="${_escapeAttr(info.message_id)}"`,
+    `type="${_escapeAttr(info.message_type)}"`,
+  ];
+  if (info.sender_open_id) {
+    attrs.push(`author_open_id="${_escapeAttr(info.sender_open_id)}"`);
+  }
+  if (info.created_at) {
+    attrs.push(`time="${new Date(info.created_at).toISOString()}"`);
+  }
+  const { text, truncated } = _truncateQuotedText(
+    info.text,
+    _QUOTED_TEXT_MAX_CHARS,
+  );
+  if (truncated) attrs.push(`truncated="true"`);
+  return (
+    `<quoted_message ${attrs.join(" ")}>\n` + text + `\n</quoted_message>`
+  );
+}
+
+/** Clip quoted text to a char budget; append an ellipsis when trimmed. */
+function _truncateQuotedText(
+  text: string,
+  maxChars: number,
+): { text: string; truncated: boolean } {
+  if (text.length <= maxChars) return { text, truncated: false };
+  return { text: text.slice(0, maxChars - 1) + "…", truncated: true };
+}
+
+/** Escape a string for safe use inside an XML attribute. */
+function _escapeAttr(value: string): string {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
 }
 
 /**

@@ -220,18 +220,21 @@ async function _uploadMessageResource(
               fs.mkdirSync(downloadPath, { recursive: true });
             }
             if (imageName) {
-              fs.writeFileSync(
-                nodePath.join(downloadPath, imageName),
-                Buffer.from(imageBuffer),
-              );
-              imagePath = nodePath.join("workspace", "downloads", imageName);
+              imagePath = nodePath.join(downloadPath, imageName);
+              fs.writeFileSync(imagePath, Buffer.from(imageBuffer));
             }
           } catch {
             text = text.replaceAll(image, `[${imagePath}](${imagePath})`);
           }
         }
-        if (fs.existsSync(nodePath.join(config.paths.home, imagePath))) {
-          const imageKey = await uploadImage(imagePath);
+        // Paths may be absolute (Feishu downloads, since we moved away
+        // from relative-to-HOME) or relative-to-home (legacy sessions,
+        // markdown written by agents using the old scheme).
+        const absPath = nodePath.isAbsolute(imagePath)
+          ? imagePath
+          : nodePath.join(config.paths.home, imagePath);
+        if (fs.existsSync(absPath)) {
+          const imageKey = await uploadImage(absPath);
           text = text.replaceAll(image, `![image](${imageKey})`);
         } else {
           text = text.replaceAll(image, "");
