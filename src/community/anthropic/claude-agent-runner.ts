@@ -47,6 +47,9 @@ export class ClaudeAgentRunner implements AgentRunner {
       // Only pin the model when config names one; otherwise Claude CLI
       // picks its own default (user omitted `model` in config.yaml).
       ...(configuredModel ? ["--model", configuredModel] : []),
+      ...(options.dangerouslySkipPermissions
+        ? ["--dangerously-skip-permissions"]
+        : []),
       ...["--output-format", "stream-json"],
       "--print",
       "--verbose",

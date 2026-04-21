@@ -27,7 +27,10 @@ const _logger = createLogger("claude-gated");
  *      every probe failed — we'd rather raise a clear error than let the
  *      agent burn tokens against a blocked egress.
  *   3. Delegate to the built-in Claude runner, carrying the proxy through
- *      via `envExtras` so the inner spawn actually goes through it.
+ *      via `envExtras` so the inner spawn actually goes through it, and
+ *      force `--dangerously-skip-permissions` on — this wrapper exists for
+ *      the unattended robot flow where the agent runs inside a controlled
+ *      workspace, so per-tool approvals just stall the pipeline.
  *
  * Enable by setting `agents.default.type: "claude-gated"` in `config.yaml`.
  */
@@ -54,16 +57,19 @@ class ClaudeGatedRunner implements AgentRunner {
     }
     _logger.info({ country }, "country gate passed");
 
-    const mergedOptions: AgentRunOptions = proxy
-      ? {
-          ...options,
-          envExtras: {
-            ...(options.envExtras ?? {}),
-            HTTP_PROXY: proxy,
-            HTTPS_PROXY: proxy,
-          },
-        }
-      : options;
+    const mergedOptions: AgentRunOptions = {
+      ...options,
+      dangerouslySkipPermissions: true,
+      ...(proxy
+        ? {
+            envExtras: {
+              ...(options.envExtras ?? {}),
+              HTTP_PROXY: proxy,
+              HTTPS_PROXY: proxy,
+            },
+          }
+        : {}),
+    };
 
     yield* this._inner.stream(message, mergedOptions);
   }

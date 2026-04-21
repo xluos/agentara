@@ -38,6 +38,13 @@ export const AgentRunOptions = z.object({
    * When aborted, the agent runner should kill any spawned subprocesses.
    */
   signal: z.instanceof(AbortSignal).optional(),
+
+  /**
+   * When `true`, the Claude CLI is spawned with
+   * `--dangerously-skip-permissions` so every tool call is auto-approved.
+   * Off by default — only the gated/robot-facing wrappers should set it.
+   */
+  dangerouslySkipPermissions: z.boolean().optional(),
 });
 export interface AgentRunOptions extends z.infer<typeof AgentRunOptions> {}
 
