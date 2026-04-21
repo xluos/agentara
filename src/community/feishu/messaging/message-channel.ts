@@ -20,9 +20,33 @@ import {
 
 
 import { feishuBotGroups, feishuThreads } from "./data";
-import { renderMessageCard, splitMarkdownByTables } from "./message-renderer";
+import {
+  renderMessageCard,
+  splitMarkdownByTables,
+  splitMessageContentForCards,
+} from "./message-renderer";
 import type { Card, MessageReceiveEventData } from "./types";
 import { convertPostToMarkdown } from "./utils";
+
+/**
+ * A chain of Feishu cards that together render a single logical assistant
+ * message. The channel splits overflow-prone content (many tool steps,
+ * table-heavy markdown) into multiple cards pre-flight rather than
+ * retrying after Feishu rejects the PATCH.
+ *
+ * Invariants:
+ *  - `cards[0]` is the anchor message_id, exposed to callers as
+ *    `AssistantMessage.id`.
+ *  - `cards[0..finalized-1]` are frozen: fully rendered in non-streaming
+ *    form; we never PATCH them again.
+ *  - `cards[cards.length - 1]` (when `finalized < cards.length`) is the
+ *    active card receiving live updates.
+ */
+interface CardChain {
+  cards: string[];
+  finalized: number;
+  replyInThread: boolean;
+}
 
 function _isFeishuBadRequestError(err: unknown): boolean {
   if (!err || typeof err !== "object") {
@@ -59,6 +83,7 @@ export class FeishuMessageChannel
   private _client: Client;
   private _db: DrizzleDB;
   private _failedCardUpdateMessages = new Set<string>();
+  private _cardChains = new Map<string, CardChain>();
   private _logger: Logger;
   private _requireMention: boolean;
   private _botOpenId?: string;
@@ -558,97 +583,97 @@ export class FeishuMessageChannel
       replyInThread = true,
     }: { streaming?: boolean; replyInThread?: boolean } = {},
   ): Promise<AssistantMessage> {
-    const { firstMessageContent, remainingChunks } = this._prepareMessageContent(
-      message.content,
-      streaming,
-    );
-
-    const card = await renderMessageCard(firstMessageContent, {
-      streaming,
-      uploadImage: this.uploadImage.bind(this),
-    });
+    const chunks = this._splitIntoCardChunks(message.content, streaming);
     if (!streaming) {
       this._logOutboundMessage(message.session_id, message.content);
     }
+
+    // Post the primary (first chunk) as a reply to the user's message.
+    const primaryCard = await this._renderChunk(chunks[0]!, {
+      streaming: streaming && chunks.length === 1,
+    });
     const { data: replyMessage } = await this._client.im.message.reply({
-      path: {
-        message_id: messageId,
-      },
+      path: { message_id: messageId },
       data: {
         msg_type: "interactive",
-        content: JSON.stringify(card),
+        content: JSON.stringify(primaryCard),
         reply_in_thread: replyInThread,
       },
     });
-    if (!replyMessage) {
+    if (!replyMessage?.message_id) {
       throw new Error("Failed to reply message");
     }
+    const anchorId = replyMessage.message_id;
 
-    if (replyInThread) {
-      const { thread_id: threadId } = replyMessage;
-      if (threadId) {
-        this._mapThreadToSession(threadId, message.session_id);
-      }
+    if (replyInThread && replyMessage.thread_id) {
+      this._mapThreadToSession(replyMessage.thread_id, message.session_id);
     }
 
-    await this._sendRemainingChunks(
-      replyMessage.message_id!,
-      remainingChunks,
+    const chain: CardChain = {
+      cards: [anchorId],
+      finalized: 0,
       replyInThread,
-    );
+    };
+    await this._growChainToFit(chain, chunks, streaming);
+    if (!streaming) {
+      chain.finalized = chain.cards.length;
+    }
+    this._cardChains.set(anchorId, chain);
 
     const assistantMessage = message as AssistantMessage;
-    assistantMessage.id = replyMessage.message_id!;
+    assistantMessage.id = anchorId;
 
     if (!streaming) {
-      const lastText = message.content.filter((c) => c.type === "text").pop();
-      if (lastText?.type === "text") {
-        await this._sendLocalFileAttachments(
-          assistantMessage.id,
-          lastText.text,
-        );
-      }
+      await this._sendFileAttachmentsForFinalText(
+        assistantMessage.id,
+        message.content,
+      );
     }
-
     return assistantMessage;
   }
 
   async postMessage(
     message: Omit<AssistantMessage, "id">,
   ): Promise<AssistantMessage> {
-    const { firstMessageContent, remainingChunks } = this._prepareMessageContent(
-      message.content,
-      false,
-    );
-
-    const card = await renderMessageCard(firstMessageContent, {
-      streaming: false,
-      uploadImage: this.uploadImage.bind(this),
-    });
+    const chunks = this._splitIntoCardChunks(message.content, false);
     this._logOutboundMessage(message.session_id, message.content);
+
+    const primaryCard = await this._renderChunk(chunks[0]!, {
+      streaming: false,
+    });
     const { data } = await this._client.im.message.create({
-      params: {
-        receive_id_type: "chat_id",
-      },
+      params: { receive_id_type: "chat_id" },
       data: {
         receive_id: this.config.chatId,
         msg_type: "interactive",
-        content: JSON.stringify(card),
+        content: JSON.stringify(primaryCard),
       },
     });
-    if (!data) {
+    if (!data?.message_id) {
       throw new Error("Failed to post message");
     }
-    const { message_id: messageId } = data;
+    const anchorId = data.message_id;
+
+    const chain: CardChain = {
+      cards: [anchorId],
+      finalized: 0,
+      // post-then-reply continuation cards attach to the primary with
+      // reply_in_thread:true, matching the pre-chain behavior.
+      replyInThread: true,
+    };
+    await this._growChainToFit(chain, chunks, /* streaming */ false);
+    // postMessage is always a final one-shot — lock the whole chain so the
+    // primary (created outside _growChainToFit) is counted as finalized too.
+    chain.finalized = chain.cards.length;
+    this._cardChains.set(anchorId, chain);
+
     const assistantMessage = message as AssistantMessage;
-    assistantMessage.id = messageId!;
+    assistantMessage.id = anchorId;
 
-    await this._sendRemainingChunks(assistantMessage.id, remainingChunks);
-
-    const lastText = message.content.filter((c) => c.type === "text").pop();
-    if (lastText?.type === "text") {
-      await this._sendLocalFileAttachments(assistantMessage.id, lastText.text);
-    }
+    await this._sendFileAttachmentsForFinalText(
+      assistantMessage.id,
+      message.content,
+    );
 
     const emojis = [
       "思考中",
@@ -659,9 +684,7 @@ export class FeishuMessageChannel
       "挥手",
     ];
     const { data: replyData } = await this._client.im.message.reply({
-      path: {
-        message_id: assistantMessage.id,
-      },
+      path: { message_id: assistantMessage.id },
       data: {
         content: JSON.stringify({
           type: "text",
@@ -671,10 +694,8 @@ export class FeishuMessageChannel
         reply_in_thread: true,
       },
     });
-    if (replyData) {
-      const { thread_id: threadId } = replyData;
-      const sessionId = message.session_id;
-      this._mapThreadToSession(threadId!, sessionId);
+    if (replyData?.thread_id) {
+      this._mapThreadToSession(replyData.thread_id, message.session_id);
     }
     return assistantMessage;
   }
@@ -688,27 +709,58 @@ export class FeishuMessageChannel
       return;
     }
 
-    const { firstMessageContent, remainingChunks } = this._prepareMessageContent(
-      message.content,
-      streaming,
-    );
+    const chain =
+      this._cardChains.get(message.id) ??
+      // Lazy-init: a channel restart can lose in-memory chain state. Treat
+      // the incoming `message.id` as the anchor of a fresh single-card chain
+      // and let `_growChainToFit` append continuations as needed.
+      ({
+        cards: [message.id],
+        finalized: 0,
+        replyInThread: true,
+      } as CardChain);
 
-    const card = await renderMessageCard(firstMessageContent, {
-      streaming,
-      uploadImage: this.uploadImage.bind(this),
-    });
+    const chunks = this._splitIntoCardChunks(message.content, streaming);
     if (!streaming) {
       this._logOutboundMessage(message.session_id, message.content);
     }
+
     try {
-      await this._client.im.message.patch({
-        path: {
-          message_id: message.id,
-        },
-        data: {
-          content: JSON.stringify(card),
-        },
-      });
+      // Freeze any previously-active cards that are no longer the last in
+      // the chain (new step cards have been added after them).
+      while (chain.finalized < Math.min(chunks.length - 1, chain.cards.length)) {
+        const idx = chain.finalized;
+        const frozenCard = await this._renderChunk(chunks[idx]!, {
+          streaming: false,
+        });
+        await this._patchCard(chain.cards[idx]!, frozenCard);
+        chain.finalized++;
+      }
+
+      const initialLen = chain.cards.length;
+      await this._growChainToFit(chain, chunks, streaming);
+
+      // If we didn't grow the chain this round, the active (last) card
+      // still needs a refresh to pick up the new steps. Skip when the last
+      // card is already frozen, or when the chunk it was rendered from no
+      // longer exists (defensive — content isn't expected to shrink).
+      const lastIdx = chain.cards.length - 1;
+      if (
+        chain.cards.length === initialLen &&
+        lastIdx >= 0 &&
+        chain.finalized <= lastIdx &&
+        lastIdx < chunks.length
+      ) {
+        const card = await this._renderChunk(chunks[lastIdx]!, { streaming });
+        await this._patchCard(chain.cards[lastIdx]!, card);
+      }
+      // Final state reached — lock the whole chain so any stray later calls
+      // are no-ops rather than redundant PATCHes.
+      if (!streaming) {
+        chain.finalized = chain.cards.length;
+      }
+
+      this._cardChains.set(message.id, chain);
     } catch (err) {
       if (_isFeishuBadRequestError(err)) {
         this._failedCardUpdateMessages.add(message.id);
@@ -722,13 +774,8 @@ export class FeishuMessageChannel
       throw err;
     }
 
-    await this._sendRemainingChunks(message.id, remainingChunks);
-
     if (!streaming) {
-      const lastText = message.content.filter((c) => c.type === "text").pop();
-      if (lastText?.type === "text") {
-        await this._sendLocalFileAttachments(message.id, lastText.text);
-      }
+      await this._sendFileAttachmentsForFinalText(message.id, message.content);
     }
   }
 
@@ -865,63 +912,114 @@ export class FeishuMessageChannel
   }
 
   /**
-   * Prepare message content for sending, splitting if necessary due to table limits.
-   * @param content - Original message content.
-   * @param streaming - Whether the message is being streamed (skip splitting if true).
-   * @returns First chunk content and remaining chunks to send as follow-ups.
+   * Split assistant message content into a list of card-ready chunks.
+   *
+   * Stage 1 — step panel overflow: spread thinking/tool_use blocks across
+   * chunks capped at {@link MAX_STEPS_PER_CARD} so no single panel exceeds
+   * Feishu's 50-element container cap.
+   *
+   * Stage 2 — markdown table overflow (non-streaming only): the final
+   * answer lives on the last step chunk; if it carries more than Feishu's
+   * 5-tables-per-card limit, the surplus gets peeled off into text-only
+   * continuation chunks appended after the last step chunk.
+   *
+   * During streaming we skip stage 2 because the final text isn't present
+   * yet (and any interim text is ephemeral).
    */
-  private _prepareMessageContent(
+  private _splitIntoCardChunks(
     content: AssistantMessage["content"],
     streaming: boolean,
-  ): {
-    firstMessageContent: AssistantMessage["content"];
-    remainingChunks: string[];
-  } {
-    const lastTextContent = content.findLast((c) => c.type === "text");
-    const markdownChunks = lastTextContent
-      ? splitMarkdownByTables(lastTextContent.text)
-      : [];
-    const needsSplit = !streaming && markdownChunks.length > 1;
+  ): AssistantMessage["content"][] {
+    const chunks = splitMessageContentForCards(content);
+    if (streaming) {
+      return chunks;
+    }
+    const last = chunks[chunks.length - 1]!;
+    const lastTextIdx = last.findLastIndex((c) => c.type === "text");
+    if (lastTextIdx === -1) return chunks;
+    const lastText = last[lastTextIdx]!;
+    if (lastText.type !== "text") return chunks;
+    const textChunks = splitMarkdownByTables(lastText.text);
+    if (textChunks.length <= 1) return chunks;
+    const rewrittenLast = [...last];
+    rewrittenLast[lastTextIdx] = { ...lastText, text: textChunks[0]! };
+    chunks[chunks.length - 1] = rewrittenLast as AssistantMessage["content"];
+    for (let i = 1; i < textChunks.length; i++) {
+      chunks.push([
+        { type: "text", text: textChunks[i]! },
+      ] as AssistantMessage["content"]);
+    }
+    return chunks;
+  }
 
-    const firstMessageContent = needsSplit
-      ? (content.map((c) =>
-          c.type === "text" ? { ...c, text: markdownChunks[0] } : c,
-        ) as AssistantMessage["content"])
-      : content;
+  /** Render a single card-chunk. */
+  private async _renderChunk(
+    chunk: AssistantMessage["content"],
+    { streaming }: { streaming: boolean },
+  ): Promise<Card> {
+    return renderMessageCard(chunk, {
+      streaming,
+      uploadImage: this.uploadImage.bind(this),
+    });
+  }
 
-    const remainingChunks = needsSplit ? markdownChunks.slice(1) : [];
-
-    return { firstMessageContent, remainingChunks };
+  /** PATCH an existing Feishu card with a new body. */
+  private async _patchCard(messageId: string, card: Card): Promise<void> {
+    await this._client.im.message.patch({
+      path: { message_id: messageId },
+      data: { content: JSON.stringify(card) },
+    });
   }
 
   /**
-   * Send remaining markdown chunks as follow-up reply messages.
-   * @param messageId - The message ID to reply to.
-   * @param chunks - Array of markdown strings to send.
+   * Extend {@link chain} so it has a Feishu card for every chunk in
+   * {@link chunks}. Newly created non-last chunks are posted in frozen
+   * form and immediately marked finalized — we won't touch them again.
+   * The trailing chunk is posted in its current streaming state so it
+   * keeps receiving live updates.
    */
-  private async _sendRemainingChunks(
-    messageId: string,
-    chunks: string[],
-    replyInThread = true,
+  private async _growChainToFit(
+    chain: CardChain,
+    chunks: AssistantMessage["content"][],
+    streaming: boolean,
   ): Promise<void> {
-    for (const chunkText of chunks) {
-      const chunkCard = await renderMessageCard(
-        [{ type: "text", text: chunkText }],
-        {
-          streaming: false,
-          uploadImage: this.uploadImage.bind(this),
-        },
-      );
-      await this._client.im.message.reply({
-        path: {
-          message_id: messageId,
-        },
+    while (chain.cards.length < chunks.length) {
+      const idx = chain.cards.length;
+      const isLast = idx === chunks.length - 1;
+      const card = await this._renderChunk(chunks[idx]!, {
+        streaming: streaming && isLast,
+      });
+      // Continuation cards hang off the anchor so Feishu renders them as
+      // siblings within the same topic thread. Replying to the previous
+      // continuation would nest them infinitely.
+      const { data } = await this._client.im.message.reply({
+        path: { message_id: chain.cards[0]! },
         data: {
           msg_type: "interactive",
-          content: JSON.stringify(chunkCard),
-          reply_in_thread: replyInThread,
+          content: JSON.stringify(card),
+          reply_in_thread: chain.replyInThread,
         },
       });
+      if (!data?.message_id) {
+        throw new Error("Failed to post continuation card");
+      }
+      chain.cards.push(data.message_id);
+      // Finalize non-last cards unconditionally, and the trailing card too
+      // when the whole message is non-streaming (no more updates coming).
+      if (!isLast || !streaming) {
+        chain.finalized++;
+      }
+    }
+  }
+
+  /** Send file attachments referenced in the final text block, if any. */
+  private async _sendFileAttachmentsForFinalText(
+    messageId: string,
+    content: AssistantMessage["content"],
+  ): Promise<void> {
+    const lastText = content.filter((c) => c.type === "text").pop();
+    if (lastText?.type === "text") {
+      await this._sendLocalFileAttachments(messageId, lastText.text);
     }
   }
 

@@ -24,6 +24,26 @@ import type {
 } from "./types";
 
 /**
+ * Maximum step-panel elements per card. A single Feishu container is capped
+ * at 50 elements server-side (error 11310 `element exceeds the limit`); we
+ * keep cards well under that for UX breathing room and let the channel
+ * spill overflow into a follow-up card instead of truncating.
+ */
+export const MAX_STEPS_PER_CARD = 25;
+
+/**
+ * Per-card step-panel byte budget used by the content splitter.
+ *
+ * Feishu caps a card's JSON `content` field at ~30 KB. Subtract the card
+ * wrapper (config/header/summary/collapsible shell ≈ 1 KB), the trailing
+ * "more" indicator, and leave headroom for the final markdown text block
+ * on the last card — 20 KB for step elements keeps every split chunk
+ * comfortably under the hard ceiling while avoiding chopping on short
+ * natural-size steps.
+ */
+export const MAX_STEP_PANEL_BYTES_PER_CARD = 20 * 1024;
+
+/**
  * Render assistant message content as a Feishu interactive card.
  * @param messageContent - Array of content blocks (thinking, tool_use, text).
  * @param options - Rendering options (streaming mode).
@@ -34,10 +54,19 @@ export async function renderMessageCard(
   {
     streaming,
     uploadImage,
+    totalStepCount,
   }: {
     streaming: boolean;
     // eslint-disable-next-line no-unused-vars
     uploadImage: (path: string) => Promise<string>;
+    /**
+     * Grand total of steps across the whole card chain. When rendering a
+     * chunk that is only a slice of the real step list (the channel is
+     * splitting an overflowing message into multiple cards), the chunk's
+     * own element count understates progress; pass the true total here so
+     * the "Working on it (N steps)" header stays accurate.
+     */
+    totalStepCount?: number;
   },
 ): Promise<Card> {
   const stepPanel: CollapsiblePanel = {
@@ -88,6 +117,7 @@ export async function renderMessageCard(
       _renderTool(content, stepPanel);
     }
   }
+  const headerStepCount = totalStepCount ?? stepPanel.elements.length;
   if (!streaming) {
     // Find the last text block (final response), not all text blocks
     const lastTextContent = messageContent.findLast((c) => c.type === "text");
@@ -107,10 +137,9 @@ export async function renderMessageCard(
     }
   }
 
-  const stepCount = stepPanel.elements.length;
-  if (stepCount > 0) {
+  if (stepPanel.elements.length > 0) {
     const stepCountText =
-      stepCount + " " + (stepCount === 1 ? "step" : "steps");
+      headerStepCount + " " + (headerStepCount === 1 ? "step" : "steps");
     if (streaming) {
       stepPanel.header.title.content = `Working on it (${stepCountText})`;
       card.config!.summary.content = `Working on it (${stepCountText})`;
@@ -298,6 +327,106 @@ function _renderTool(
         _renderStep(content.name, "setting-inter_outlined"),
       );
   }
+}
+
+/**
+ * Approximate the JSON byte footprint a step-emitting block will cost
+ * inside the step panel. Used purely for pre-flight splitting decisions —
+ * accuracy within ±20% is enough; we just need to avoid chunks that
+ * would blow past Feishu's 30 KB content cap on long Bash commands or
+ * dense thinking traces.
+ *
+ * The 220-byte base covers the div / icon / plain_text wrapper JSON the
+ * renderer stamps around each step.
+ */
+function _estimateStepByteCost(block: AssistantMessage["content"][number]): number {
+  return JSON.stringify(block).length + 220;
+}
+
+/**
+ * Split an assistant message's content across multiple cards when it has
+ * too many step-emitting blocks (thinking + tool_use) — or too many
+ * bytes' worth — to fit in one Feishu container. Each returned chunk is
+ * itself a valid input for {@link renderMessageCard}.
+ *
+ * Rules:
+ *  - Thinking / tool_use blocks are distributed in their original order
+ *    across chunks. A chunk closes when the next step would push either
+ *    its element count past `maxSteps` or its estimated rendered bytes
+ *    past `maxBytes`. A single oversized step still gets its own chunk
+ *    (we never drop content).
+ *  - Text blocks (final answer / narration) never count toward either
+ *    cap; they're all attached to the LAST chunk so the conversational
+ *    reply lands on the active card, not buried mid-chain.
+ *  - If content fits in a single card by both metrics, returns
+ *    `[content]` unchanged.
+ *
+ * Returns at least one chunk — an empty input yields `[[]]`.
+ */
+export function splitMessageContentForCards(
+  content: AssistantMessage["content"],
+  {
+    maxSteps = MAX_STEPS_PER_CARD,
+    maxBytes = MAX_STEP_PANEL_BYTES_PER_CARD,
+  }: { maxSteps?: number; maxBytes?: number } = {},
+): AssistantMessage["content"][] {
+  const stepBlocks = content.filter(
+    (c) => c.type === "thinking" || c.type === "tool_use",
+  );
+  const nonStepBlocks = content.filter(
+    (c) => c.type !== "thinking" && c.type !== "tool_use",
+  );
+
+  // Fast path: small enough to fit on a single card. Bytes are estimated
+  // up-front so we skip walking the list when we're well under budget.
+  if (stepBlocks.length <= maxSteps) {
+    let totalBytes = 0;
+    for (const b of stepBlocks) totalBytes += _estimateStepByteCost(b);
+    if (totalBytes <= maxBytes) {
+      return [content];
+    }
+  }
+
+  const chunks: AssistantMessage["content"][] = [];
+  let current: AssistantMessage["content"] = [];
+  let currentBytes = 0;
+  for (const block of stepBlocks) {
+    const blockBytes = _estimateStepByteCost(block);
+    const overflow =
+      current.length >= maxSteps ||
+      (current.length > 0 && currentBytes + blockBytes > maxBytes);
+    if (overflow) {
+      chunks.push(current);
+      current = [];
+      currentBytes = 0;
+    }
+    current.push(block);
+    currentBytes += blockBytes;
+  }
+  if (current.length > 0 || chunks.length === 0) {
+    chunks.push(current);
+  }
+
+  // Final answer / text narration belongs on the LAST card — a user
+  // scrolling the thread expects the reply next to the "live" card, not
+  // frozen in the middle of the chain.
+  if (nonStepBlocks.length > 0) {
+    chunks[chunks.length - 1]!.push(
+      ...(nonStepBlocks as AssistantMessage["content"]),
+    );
+  }
+  return chunks;
+}
+
+/** Count step-emitting blocks (thinking + tool_use) across content. */
+export function countStepBlocks(content: AssistantMessage["content"]): number {
+  let n = 0;
+  for (const c of content) {
+    if (c.type === "thinking" || c.type === "tool_use") {
+      n++;
+    }
+  }
+  return n;
 }
 
 /** Create a step element (icon + text) for the collapsible panel. */
