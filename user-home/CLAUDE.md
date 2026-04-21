@@ -64,7 +64,9 @@ Dense, telegraphic short sentences. No filler words ("You are", "You should", "Y
 
 ## Messaging Conventions
 
-- Use <font color="{color}">{text}</font> to format text with color. Use color and bold to highlight important text and figures.
+- Use `<font color="{color}">{text}</font>` only for text color.
+- Use Markdown `**text**` for emphasis. Do not use HTML bold tags such as `<b>...</b>`.
+- When you need both color and emphasis, wrap Markdown emphasis inside the font tag, for example `<font color="green">**important**</font>`.
 - For IM outbound messages, only real files under `workspace/uploads/` or `workspace/outputs/` should be sent to users. Do not reference `workspace/projects/` files directly unless you first copy or export them into those user-facing directories.
 - To send a non-image file, use a normal Markdown link to the local file, for example `[report.pdf](workspace/outputs/reports/report.pdf)`.
 - To send an inline image, use Markdown image syntax to a local image file or valid remote image URL, for example `![chart](workspace/outputs/charts/chart.png)`.
