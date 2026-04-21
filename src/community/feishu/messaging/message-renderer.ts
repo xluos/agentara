@@ -71,6 +71,10 @@ const _SUMMARY_PREVIEW_CHARS = 180;
  * Render assistant message content as a Feishu interactive card.
  * @param messageContent - Array of content blocks (thinking, tool_use, text).
  * @param options - Rendering options (streaming mode).
+ *   - `elapsedMs`: optional response-duration hint in milliseconds. When
+ *     provided and `streaming` is false, the card renders a small grey
+ *     note at the bottom like "Done in 12.8s" so users can see how long
+ *     the run took.
  * @returns Feishu Card object for API payload.
  */
 export async function renderMessageCard(
@@ -78,10 +82,12 @@ export async function renderMessageCard(
   {
     streaming,
     uploadImage,
+    elapsedMs,
   }: {
     streaming: boolean;
     // eslint-disable-next-line no-unused-vars
     uploadImage: (path: string) => Promise<string>;
+    elapsedMs?: number;
   },
 ): Promise<Card> {
   const stepPanel: CollapsiblePanel = {
@@ -189,8 +195,38 @@ export async function renderMessageCard(
         color: "grey",
       },
     });
+  } else if (typeof elapsedMs === "number" && elapsedMs >= 0) {
+    card.body.elements.push({
+      tag: "div",
+      text: {
+        tag: "plain_text",
+        text_color: "grey",
+        text_size: "notation",
+        content: `Done in ${_formatDuration(elapsedMs)}`,
+      },
+    });
   }
   return card;
+}
+
+/**
+ * Human-friendly duration string for the card's "Done in …" note.
+ * Sub-second runs round to 0.1s; sub-minute shows a single decimal;
+ * minutes drop the decimal and pad seconds; hours add an `h` prefix.
+ */
+function _formatDuration(ms: number): string {
+  const totalSeconds = ms / 1000;
+  if (totalSeconds < 60) {
+    return `${totalSeconds.toFixed(1)}s`;
+  }
+  const totalSecondsInt = Math.floor(totalSeconds);
+  const hours = Math.floor(totalSecondsInt / 3600);
+  const minutes = Math.floor((totalSecondsInt % 3600) / 60);
+  const seconds = totalSecondsInt % 60;
+  if (hours === 0) {
+    return `${minutes}m ${seconds}s`;
+  }
+  return `${hours}h ${minutes}m ${seconds}s`;
 }
 
 async function _uploadMessageResource(

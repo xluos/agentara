@@ -78,6 +78,13 @@ export class FeishuMessageChannel
    * update doesn't double-post continuations.
    */
   private _finalizedPrimaries = new Set<string>();
+  /**
+   * Wall-clock start timestamps of in-flight streaming cards, keyed by
+   * primary message id. Set when the first streaming reply is created and
+   * consumed on the final (`streaming: false`) patch so we can render a
+   * "Done in Xs" note at the bottom of the finalized card.
+   */
+  private _cardStartedAt = new Map<string, number>();
   private _logger: Logger;
   private _requireMention: boolean;
   private _botOpenId?: string;
@@ -622,6 +629,10 @@ export class FeishuMessageChannel
       this._mapThreadToSession(replyMessage.thread_id, message.session_id);
     }
 
+    if (streaming) {
+      this._cardStartedAt.set(primaryId, Date.now());
+    }
+
     if (!streaming && markdownContinuations.length > 0) {
       await this._postMarkdownContinuations(
         primaryId,
@@ -724,9 +735,15 @@ export class FeishuMessageChannel
       this._logOutboundMessage(message.session_id, message.content);
     }
 
+    const startedAt = this._cardStartedAt.get(message.id);
+    const elapsedMs =
+      !streaming && typeof startedAt === "number"
+        ? Date.now() - startedAt
+        : undefined;
     const card = await renderMessageCard(primaryContent, {
       streaming,
       uploadImage: this.uploadImage.bind(this),
+      elapsedMs,
     });
     try {
       await this._client.im.message.patch({
@@ -744,6 +761,9 @@ export class FeishuMessageChannel
         return;
       }
       throw err;
+    }
+    if (!streaming) {
+      this._cardStartedAt.delete(message.id);
     }
 
     // Markdown continuations are only meaningful once the run is final —
