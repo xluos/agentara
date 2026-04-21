@@ -490,10 +490,13 @@ export class CodexAgentRunner implements AgentRunner {
     resumeId: string;
     prompt: string;
   }): string[] {
+    const configuredModel = config.agents.default.model;
     const shared = [
       "codex",
       "exec",
-      ...["--model", config.agents.default.model],
+      // Only pin the model when config names one; otherwise Codex CLI
+      // picks its own default (user omitted `model` in config.yaml).
+      ...(configuredModel ? ["--model", configuredModel] : []),
       "--json",
       "--dangerously-bypass-approvals-and-sandbox",
       "--skip-git-repo-check",

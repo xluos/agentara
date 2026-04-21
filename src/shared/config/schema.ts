@@ -2,10 +2,15 @@ import { z } from "zod";
 
 /**
  * Configuration for a single agent.
+ *
+ * `model` is optional on purpose — when unset, the runner skips the
+ * `--model` CLI flag entirely so the underlying tool (Claude Code, Codex)
+ * picks its own default. This sidesteps the "one model key for two CLIs"
+ * problem where e.g. `claude-sonnet-4-6` is nonsense to Codex.
  */
 export const AgentConfig = z.object({
   type: z.string(),
-  model: z.string().default("claude-sonnet-4-6"),
+  model: z.string().optional(),
 });
 export interface AgentConfig extends z.infer<typeof AgentConfig> {}
 

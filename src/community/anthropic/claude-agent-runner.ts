@@ -40,10 +40,13 @@ export class ClaudeAgentRunner implements AgentRunner {
       extractTextContent(message),
     );
 
+    const configuredModel = config.agents.default.model;
     const args = [
       "claude",
       ...(!isNew ? ["--resume", sessionId] : ["--session-id", sessionId]),
-      ...["--model", config.agents.default.model],
+      // Only pin the model when config names one; otherwise Claude CLI
+      // picks its own default (user omitted `model` in config.yaml).
+      ...(configuredModel ? ["--model", configuredModel] : []),
       ...["--output-format", "stream-json"],
       "--print",
       "--verbose",
