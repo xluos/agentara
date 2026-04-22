@@ -523,6 +523,7 @@ export const helpHandler: CommandHandler = {
             "- /setup — 打开 workspace 配置卡片（仅群聊）",
             "- /switch — 打开 workspace 切换卡片（群聊 & 单聊）",
             "- /group <群名> @user... — 机器人建群并自动 /setup（仅单聊）",
+            "- /new <消息> — 开启新会话 + 新话题（须在主群，非话题内）",
           ],
         },
       ],

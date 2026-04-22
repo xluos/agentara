@@ -18,7 +18,17 @@ import {
 
 import { HonoServer } from "../server";
 
-import { CommandRegistry, parseCommand, type CardCommandResult } from "./commands";
+import {
+  buildNewCommandRejectionReply,
+  buildNewCommandUsageReply,
+  buildUnknownCommandReply,
+  CommandRegistry,
+  createFreshUserMessage,
+  extractNewPrompt,
+  isNewCommand,
+  parseCommand,
+  type CardCommandResult,
+} from "./commands";
 import { buildCommandCard } from "./commands/cards";
 import { GroupFlow } from "./group/group-flow";
 import { MultiChannelMessageGateway } from "./messaging";
@@ -233,10 +243,23 @@ class Kernel {
       return;
     }
 
-    // Try gateway-level slash commands before dispatching to the LLM.
+    // Handle /new command (kernel-owned — forks a fresh session + fresh
+    // Feishu thread, optionally carrying the post-slash text as the first
+    // agent prompt). Equivalent to @-mentioning the bot in the main chat.
+    if (isNewCommand(text)) {
+      await this._handleNewCommand(message, text);
+      return;
+    }
+
+    // Gateway-level slash commands: any `/`-prefixed message must be
+    // resolved here. If it's not a registered command, reply with an
+    // error rather than forwarding to the agent — passing `/typo` on
+    // to the LLM wastes a turn and confuses users who just mistyped
+    // a command name.
     if (text.startsWith("/")) {
       const handled = await this._tryHandleCommand(message, text);
-      if (handled) return;
+      if (!handled) await this._replyUnknownCommand(message, text);
+      return;
     }
 
     // On the first message of a new session, kick off a best-effort
@@ -285,6 +308,54 @@ class Kernel {
         );
       });
   }
+
+  private _handleNewCommand = async (message: UserMessage, text: string) => {
+    // Feishu threads don't nest: replying to an already-threaded message
+    // with reply_in_thread:true stays in the same thread. Running /new
+    // inside a thread would silently fold the "new" session into the
+    // existing one and overwrite its thread→session mapping. Reject.
+    if (message.thread_id) {
+      const reply = buildNewCommandRejectionReply();
+      await this._replyTextOrCard(message, reply.text, reply.card, "new");
+      return;
+    }
+
+    const prompt = extractNewPrompt(text);
+    if (!prompt) {
+      const reply = buildNewCommandUsageReply();
+      await this._replyTextOrCard(message, reply.text, reply.card, "new");
+      return;
+    }
+
+    // Fork: fresh session_id so isSessionStart flips true, and
+    // thread_id=undefined so replyMessage(replyInThread:true) creates a
+    // brand-new Feishu thread rooted at this user message.
+    const newMessage = createFreshUserMessage(message, prompt, uuid());
+    this._logger.info(
+      {
+        old_session_id: message.session_id,
+        new_session_id: newMessage.session_id,
+        chat_id: message.chat_id,
+        message_id: message.id,
+      },
+      "/new starting fresh session + thread",
+    );
+    if (newMessage.chat_id) {
+      this._autoSyncOnSessionStart(newMessage.chat_id);
+    }
+    await this._taskDispatcher.dispatch(newMessage.session_id, {
+      type: "inbound_message",
+      message: newMessage,
+    });
+  };
+
+  private _replyUnknownCommand = async (
+    message: UserMessage,
+    text: string,
+  ): Promise<void> => {
+    const reply = buildUnknownCommandReply(text);
+    await this._replyTextOrCard(message, reply.text, reply.card, "unknown");
+  };
 
   private _tryHandleCommand = async (
     message: UserMessage,
