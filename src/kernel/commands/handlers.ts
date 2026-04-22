@@ -448,6 +448,66 @@ const allowHandler: CommandHandler = {
   },
 };
 
+/**
+ * Toggle "auto respond" on the current thread. Default (muted) is must-@:
+ * inside a bot-created thread the bot still requires @-mention to reply,
+ * so humans can use the same thread to discuss with each other without
+ * the bot jumping in. `/unmute` flips the thread into auto-respond mode;
+ * `/mute` restores the default.
+ */
+function buildMuteHandler(
+  name: "mute" | "unmute",
+  description: string,
+  enabled: boolean,
+): CommandHandler {
+  const verb = enabled ? "解除静音" : "静音";
+  const stateLine = enabled
+    ? "✅ 已取消静音：本话题内的消息无需 @ 机器人也会响应。"
+    : "✅ 已静音：本话题内需要 @ 机器人后才会响应。";
+  return {
+    name,
+    description,
+    async execute(ctx) {
+      if (ctx.message.chat_type !== "group") {
+        return `❌ /${name} 仅在群聊话题内可用（单聊本就不需要 @）。`;
+      }
+      const threadId = ctx.message.thread_id;
+      if (!threadId) {
+        return `❌ /${name} 需要在一个话题里执行；请在机器人发起的话题内回复此命令。`;
+      }
+      if (!ctx.message.channel_id) {
+        return `❌ /${name} 需要飞书会话上下文。`;
+      }
+      const channel = ctx.feishuChannels.get(ctx.message.channel_id);
+      if (!channel) {
+        return "❌ 找不到对应的飞书 channel。";
+      }
+      channel.setThreadAutoRespond(threadId, enabled, ctx.message.session_id);
+      ctx.logger.info(
+        {
+          thread_id: threadId,
+          session_id: ctx.message.session_id,
+          auto_respond: enabled,
+        },
+        "thread auto-respond toggled",
+      );
+      return cardReply(verb, [stateLine]);
+    },
+  };
+}
+
+const muteHandler = buildMuteHandler(
+  "mute",
+  "/mute — 关闭本话题的免 @ 自动响应（恢复默认：必须 @ 机器人）",
+  false,
+);
+
+const unmuteHandler = buildMuteHandler(
+  "unmute",
+  "/unmute — 开启本话题的免 @ 自动响应（机器人自动接话）",
+  true,
+);
+
 export const helpHandler: CommandHandler = {
   name: "help",
   description: "/help — 显示所有可用命令",
@@ -480,6 +540,8 @@ export const BUILTIN_COMMANDS: CommandHandler[] = [
   checkoutHandler,
   ungroupHandler,
   allowHandler,
+  muteHandler,
+  unmuteHandler,
 ];
 
 function _formatSyncLine(r: RepoSyncResult): string {

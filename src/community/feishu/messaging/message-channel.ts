@@ -1152,16 +1152,17 @@ export class FeishuMessageChannel
       messageType,
       receivedMessage.content,
     );
-    // Messages inside a thread the bot has already engaged in are implicitly
-    // directed at the bot — no need to @-mention again. The `feishu_threads`
-    // table tracks every thread the bot has participated in (either by
-    // starting it via reply/post, or by being @-mentioned into it earlier).
-    const isInBotThread = this._isInBotThread(threadId);
+    // Messages inside a thread the bot has already engaged in still require
+    // an @-mention by default — otherwise casual in-thread chatter between
+    // humans would make the bot reply to every line. Operators can flip the
+    // thread into "auto-respond" mode via `/unmute`, which is what this flag
+    // reflects. `/mute` restores the default.
+    const isThreadAutoRespond = this._isThreadAutoRespond(threadId);
     const mentionEnforced =
       this._requireMention &&
       chatType === "group" &&
       !isSlashCommand &&
-      !isInBotThread;
+      !isThreadAutoRespond;
     const isBotMentioned =
       !!this._botOpenId &&
       !!mentions?.some((m) => m.id?.open_id === this._botOpenId);
@@ -1176,21 +1177,21 @@ export class FeishuMessageChannel
         sender_open_id: senderOpenId,
         bot_mentioned: isBotMentioned,
         slash_command: isSlashCommand,
-        in_bot_thread: isInBotThread,
+        thread_auto_respond: isThreadAutoRespond,
         passed: isAllowedSender && mentionOk,
       },
       "inbound message",
     );
 
-    // A message is "directed at the bot" if the intent is unambiguous — slash
-    // command, explicit @-mention, inside a thread the bot already owns, or a
-    // p2p chat. We only surface rejection replies for these; casual group
-    // chatter from non-whitelisted members gets silently dropped to avoid
-    // spamming the chat.
+    // A message is "directed at the bot" if the intent is unambiguous —
+    // slash command, explicit @-mention, inside an auto-respond thread, or
+    // a p2p chat. We only surface rejection replies for these; casual
+    // non-whitelisted chatter inside a muted bot-thread is silently dropped
+    // so the bot doesn't interrupt human side-discussions.
     const isIntendedForBot =
       isSlashCommand ||
       isBotMentioned ||
-      isInBotThread ||
+      isThreadAutoRespond ||
       chatType === "p2p";
 
     if (!isAllowedSender) {
@@ -1360,39 +1361,92 @@ export class FeishuMessageChannel
     };
   };
 
-  private _threadIdToSessionId = new Map<string, string>();
+  private _threadState = new Map<
+    string,
+    { session_id: string; auto_respond: boolean }
+  >();
 
   /**
-   * Returns true if `threadId` belongs to a thread the bot has engaged in
-   * before (either by starting it via reply/post, or by being @-mentioned
-   * into it). Used to bypass the @-mention requirement for follow-up
-   * messages inside a bot-owned topic. Cheap: in-memory cache first, then
-   * indexed single-row lookup on `feishu_threads`.
+   * Returns true when the thread is explicitly opted into "auto respond"
+   * mode, i.e. the operator ran `/unmute` in it. Default for every
+   * bot-participated thread is false — group messages must still @-mention
+   * the bot even inside a bot-owned topic. Cheap: in-memory cache first,
+   * then indexed single-row lookup on `feishu_threads`.
    */
-  private _isInBotThread(threadId: string | undefined): boolean {
+  private _isThreadAutoRespond(threadId: string | undefined): boolean {
     if (!threadId) return false;
-    if (this._threadIdToSessionId.has(threadId)) return true;
+    const cached = this._threadState.get(threadId);
+    if (cached) return cached.auto_respond;
     const row = this._db
-      .select({ session_id: feishuThreads.session_id })
+      .select({
+        session_id: feishuThreads.session_id,
+        auto_respond: feishuThreads.auto_respond,
+      })
       .from(feishuThreads)
       .where(eq(feishuThreads.thread_id, threadId))
       .get();
     if (row) {
-      this._threadIdToSessionId.set(threadId, row.session_id);
-      return true;
+      const state = {
+        session_id: row.session_id,
+        auto_respond: row.auto_respond === 1,
+      };
+      this._threadState.set(threadId, state);
+      return state.auto_respond;
     }
     return false;
   }
 
-  /** Persist a thread→session mapping to DB and update the in-memory cache. */
-  private _mapThreadToSession(threadId: string, sessionId: string) {
-    this._threadIdToSessionId.set(threadId, sessionId);
+  /**
+   * Flip the auto-respond flag on a thread. Persists to DB and updates the
+   * in-memory cache so the change takes effect on the very next inbound
+   * message. Creates the row if missing, though typically the thread has
+   * already been mapped by {@link _mapThreadToSession} via an earlier bot
+   * reply. Returns the resolved session id for the thread.
+   */
+  setThreadAutoRespond(
+    threadId: string,
+    enabled: boolean,
+    fallbackSessionId: string,
+  ): string {
+    const current = this._threadState.get(threadId);
+    const sessionId = current?.session_id ?? fallbackSessionId;
+    this._threadState.set(threadId, {
+      session_id: sessionId,
+      auto_respond: enabled,
+    });
+    const flag = enabled ? 1 : 0;
     this._db
       .insert(feishuThreads)
       .values({
         thread_id: threadId,
         session_id: sessionId,
         created_at: Date.now(),
+        auto_respond: flag,
+      })
+      .onConflictDoUpdate({
+        target: feishuThreads.thread_id,
+        set: { auto_respond: flag },
+      })
+      .run();
+    return sessionId;
+  }
+
+  /** Persist a thread→session mapping to DB and update the in-memory cache. */
+  private _mapThreadToSession(threadId: string, sessionId: string) {
+    const existing = this._threadState.get(threadId);
+    if (!existing) {
+      this._threadState.set(threadId, {
+        session_id: sessionId,
+        auto_respond: false,
+      });
+    }
+    this._db
+      .insert(feishuThreads)
+      .values({
+        thread_id: threadId,
+        session_id: sessionId,
+        created_at: Date.now(),
+        auto_respond: 0,
       })
       .onConflictDoNothing()
       .run();
@@ -1415,17 +1469,22 @@ export class FeishuMessageChannel
     chatId: string | undefined,
     threadId: string | undefined,
   ): string {
-    if (threadId && this._threadIdToSessionId.has(threadId)) {
-      return this._threadIdToSessionId.get(threadId)!;
-    }
     if (threadId) {
+      const cached = this._threadState.get(threadId);
+      if (cached) return cached.session_id;
       const row = this._db
-        .select({ session_id: feishuThreads.session_id })
+        .select({
+          session_id: feishuThreads.session_id,
+          auto_respond: feishuThreads.auto_respond,
+        })
         .from(feishuThreads)
         .where(eq(feishuThreads.thread_id, threadId))
         .get();
       if (row) {
-        this._threadIdToSessionId.set(threadId, row.session_id);
+        this._threadState.set(threadId, {
+          session_id: row.session_id,
+          auto_respond: row.auto_respond === 1,
+        });
         return row.session_id;
       }
       if (chatId) {

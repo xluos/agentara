@@ -15,6 +15,13 @@ export const feishuThreads = sqliteTable("feishu_threads", {
   session_id: text("session_id").notNull(),
   /** Epoch milliseconds when the mapping was created. */
   created_at: integer("created_at").notNull(),
+  /**
+   * When 1, every message inside this thread triggers the bot without
+   * requiring an @-mention. When 0 (default), group-chat messages must
+   * still @-mention the bot even inside a thread the bot already
+   * participates in. Toggle via `/unmute` / `/mute` in the thread.
+   */
+  auto_respond: integer("auto_respond").notNull().default(0),
 });
 
 /**
