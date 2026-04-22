@@ -185,13 +185,10 @@ export class GroupFlow {
   ):
     | { name: string; memberOpenIds: string[] }
     | { error: string } {
+    // Empty mention list is fine: a bot + sender 2-person group is a valid
+    // Feishu chat and the primary way `/group` is used when the user only
+    // wants a workspace-bound chat for themselves.
     const mentions = message.mentions ?? [];
-    if (mentions.length === 0) {
-      return {
-        error:
-          "用法：`/group <群名> @user1 @user2 ...`（至少 @ 一个人）",
-      };
-    }
     const seen = new Set<string>();
     const memberOpenIds: string[] = [];
     for (const m of mentions) {
@@ -203,9 +200,6 @@ export class GroupFlow {
       if (seen.has(m.open_id)) continue;
       seen.add(m.open_id);
       memberOpenIds.push(m.open_id);
-    }
-    if (memberOpenIds.length === 0) {
-      return { error: "❌ 没有识别到被 @ 的其他成员（自己不算）。" };
     }
 
     // Name is everything between `/group ` and the first mention placeholder.
