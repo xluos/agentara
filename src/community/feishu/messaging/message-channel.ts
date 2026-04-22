@@ -1253,8 +1253,11 @@ export class FeishuMessageChannel
     // When the user reply-quoted an earlier message AND the new message
     // is directed at the bot, surface the quoted context so Claude can
     // see what they're actually pointing at. Skip when it's just an
-    // in-thread reply with no explicit quote signal to the bot.
-    if (parentId && isIntendedForBot) {
+    // in-thread reply with no explicit quote signal to the bot. Slash
+    // commands are gateway-level and operate on bot state — prepending
+    // the quoted block would corrupt the leading `/…` and prevent the
+    // kernel from routing it.
+    if (parentId && isIntendedForBot && !isSlashCommand) {
       const info = await this._fetchQuotedMessage(parentId, targetDir);
       content.push({
         type: "text",
