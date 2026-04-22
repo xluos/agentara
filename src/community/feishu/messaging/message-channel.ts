@@ -1740,7 +1740,13 @@ function _peekSlashCommand(type: string, content: string): boolean {
   if (type !== "text") return false;
   try {
     const json = JSON.parse(content) as { text?: unknown };
-    const text = typeof json.text === "string" ? json.text.trimStart() : "";
+    if (typeof json.text !== "string") return false;
+    // Strip leading @_user_N placeholder runs — users habitually @ the
+    // bot before typing a slash command inside a thread, and the
+    // placeholder would otherwise hide the `/` prefix.
+    const text = json.text
+      .trimStart()
+      .replace(/^(?:@_user_\d+\s*)+/, "");
     return /^\/[a-zA-Z]/.test(text);
   } catch {
     return false;

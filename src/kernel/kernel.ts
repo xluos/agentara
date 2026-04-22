@@ -186,18 +186,24 @@ class Kernel {
   }
 
   private _handleInboundMessage = async (message: UserMessage) => {
-    // Feishu substitutes @mentions as `@_user_N` placeholders. Strip them
-    // ONLY on the first message of a session (the user @-summoning the bot
-    // to start a thread) so that `@bot /bind foo` routes through the slash
-    // command path. Subsequent messages inside the same thread keep their
-    // placeholders intact so real @-mentions of other users aren't mangled.
+    // Feishu substitutes @mentions as `@_user_N` placeholders. Two-tier
+    // stripping:
+    //   - Always drop LEADING placeholder runs so users can `@bot /foo` in
+    //     any context (new session, inside a thread, etc.) and still hit
+    //     gateway-level slash routing.
+    //   - On the first message of a session, strip ALL placeholders — the
+    //     whole line is the user summoning the bot; nothing else in it
+    //     references a real collaborator.
+    // Non-leading placeholders are preserved mid-session so real @-mentions
+    // (e.g. `/allow @other_user`, or regular chatter) aren't mangled.
     const isSessionStart = !this._sessionManager.existsSession(
       message.session_id,
     );
     const rawText = extractTextContent(message);
+    const trimmed = rawText.trim().replace(/^(?:@_user_\d+\s*)+/, "");
     const text = isSessionStart
-      ? rawText.replace(/@_user_\d+/g, "").trim()
-      : rawText.trim();
+      ? trimmed.replace(/@_user_\d+/g, "").trim()
+      : trimmed.trim();
 
     // Handle /stop command (kernel-owned because it talks to TaskDispatcher)
     if (text === "/stop") {
