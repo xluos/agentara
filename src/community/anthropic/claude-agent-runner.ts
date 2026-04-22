@@ -1,3 +1,9 @@
+import { randomUUID } from "node:crypto";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
+
 import {
   config,
   createLogger,
@@ -51,10 +57,25 @@ export class ClaudeAgentRunner implements AgentRunner {
         ? ["--dangerously-skip-permissions"]
         : []),
       ...["--output-format", "stream-json"],
-      "--print",
-      "--verbose",
-      textContentOfUserMessage,
     ];
+
+    // Wire up the interactive permission MCP bridge when the inbound
+    // message carries a known Feishu user (chat_id + channel_id +
+    // sender_open_id) and the kernel has published its internal
+    // approval endpoint into the env. Otherwise fall back to Claude's
+    // default behavior (non-interactive, auto-deny for unapproved
+    // tools) so scheduled-task and non-Feishu paths aren't broken.
+    const permissionBridge = _buildPermissionBridge(message, options);
+    if (permissionBridge) {
+      args.push(
+        "--mcp-config",
+        permissionBridge.mcpConfigPath,
+        "--permission-prompt-tool",
+        "mcp__agentara__approve_tool_use",
+      );
+    }
+
+    args.push("--print", "--verbose", textContentOfUserMessage);
     const proc = Bun.spawn(args, {
       cwd: options.cwd,
       env: {
@@ -121,6 +142,7 @@ export class ClaudeAgentRunner implements AgentRunner {
       if (signal) {
         signal.removeEventListener("abort", abortHandler);
       }
+      permissionBridge?.cleanup();
     }
 
     if (aborted) {
@@ -184,4 +206,74 @@ export class ClaudeAgentRunner implements AgentRunner {
 
 function containsToolResult(message: { content: MessageContent[] }): boolean {
   return message.content.some((content) => content.type === "tool_result");
+}
+
+interface PermissionBridge {
+  mcpConfigPath: string;
+  cleanup: () => void;
+}
+
+function _buildPermissionBridge(
+  message: UserMessage,
+  options: AgentRunOptions,
+): PermissionBridge | null {
+  if (options.dangerouslySkipPermissions) return null;
+  const chatId = message.chat_id;
+  const channelId = message.channel_id;
+  const initiatorOpenId = message.sender_open_id;
+  const approvalUrl = Bun.env.AGENTARA_PERMISSION_URL;
+  const approvalToken = Bun.env.AGENTARA_PERMISSION_TOKEN;
+  if (!chatId || !channelId || !initiatorOpenId) return null;
+  if (!approvalUrl || !approvalToken) return null;
+
+  const scriptPath = _resolveMcpScriptPath();
+  const mcpConfig = {
+    mcpServers: {
+      agentara: {
+        command: "bun",
+        args: ["run", scriptPath],
+        env: {
+          AGENTARA_APPROVAL_URL: approvalUrl,
+          AGENTARA_APPROVAL_TOKEN: approvalToken,
+          AGENTARA_SESSION_ID: message.session_id,
+          AGENTARA_CHANNEL_ID: channelId,
+          AGENTARA_CHAT_ID: chatId,
+          AGENTARA_INITIATOR_OPEN_ID: initiatorOpenId,
+          AGENTARA_REPLY_TO_MESSAGE_ID: message.id ?? "",
+        },
+      },
+    },
+  };
+  const dir = mkdtempSync(join(tmpdir(), "agentara-claude-mcp-"));
+  const mcpConfigPath = join(dir, `mcp-${randomUUID()}.json`);
+  writeFileSync(mcpConfigPath, JSON.stringify(mcpConfig));
+  return {
+    mcpConfigPath,
+    cleanup: () => {
+      try {
+        rmSync(dir, { recursive: true, force: true });
+      } catch (err) {
+        logger.warn(
+          { err, dir },
+          "failed to clean up temp mcp-config dir",
+        );
+      }
+    },
+  };
+}
+
+/**
+ * Absolute path to the stdio MCP server script. Resolved relative to
+ * this file so it works both under `bun --watch run index.ts` (dev)
+ * and from a bundled JS build where `import.meta.url` still points
+ * inside the output dir.
+ *
+ * When shipping a `bun --compile` binary the .ts source won't exist
+ * at that path at runtime — the caller would need to either keep the
+ * source alongside the binary or switch to an inlined-string strategy.
+ * Leaving a clear breadcrumb rather than silently failing.
+ */
+function _resolveMcpScriptPath(): string {
+  const here = dirname(fileURLToPath(import.meta.url));
+  return resolve(here, "permission-mcp-server.ts");
 }

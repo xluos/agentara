@@ -32,6 +32,7 @@ import {
 import { buildCommandCard } from "./commands/cards";
 import { GroupFlow } from "./group/group-flow";
 import { MultiChannelMessageGateway } from "./messaging";
+import { PERMISSION_ACTION, PermissionFlow } from "./permission";
 import { SessionManager } from "./sessioning";
 import * as sessioningSchema from "./sessioning/data";
 import { SetupFlow } from "./setup/setup-flow";
@@ -57,6 +58,7 @@ class Kernel {
   private _setupFlow!: SetupFlow;
   private _switchFlow!: SwitchFlow;
   private _groupFlow!: GroupFlow;
+  private _permissionFlow!: PermissionFlow;
 
   constructor() {
     this._initDatabase();
@@ -68,6 +70,7 @@ class Kernel {
     this._initSetupFlow();
     this._initSwitchFlow();
     this._initGroupFlow();
+    this._initPermissionFlow();
     this._initServer();
   }
 
@@ -85,6 +88,10 @@ class Kernel {
 
   get honoServer(): HonoServer {
     return this._honoServer;
+  }
+
+  get permissionFlow(): PermissionFlow {
+    return this._permissionFlow;
   }
 
   private _initDatabase(): void {
@@ -185,6 +192,12 @@ class Kernel {
     });
   }
 
+  private _initPermissionFlow(): void {
+    this._permissionFlow = new PermissionFlow({
+      feishuChannels: this._feishuChannels,
+    });
+  }
+
   /**
    * Start the kernel.
    */
@@ -192,7 +205,26 @@ class Kernel {
     await this._sessionManager.start();
     await this._taskDispatcher.start();
     await this._honoServer.start();
+    this._publishPermissionEndpointEnv();
     await this._messageGateway.start();
+  }
+
+  /**
+   * Expose the internal approval endpoint + per-boot token via
+   * `process.env` so runners in `src/community/*` can pick them up
+   * without importing from `@/kernel` (which would reverse the
+   * dependency direction). The MCP subprocess spawned by Claude
+   * reads these at spawn time; the host only advertises them after
+   * Hono has bound its port.
+   */
+  private _publishPermissionEndpointEnv(): void {
+    const port = parseInt(Bun.env.AGENTARA_SERVICE_PORT ?? "1984", 10);
+    // Force localhost — the endpoint is not internet-reachable even
+    // if Hono binds to 0.0.0.0, because the bearer token rotates per
+    // boot and isn't persisted.
+    const url = `http://127.0.0.1:${port}/internal/permission/request`;
+    process.env.AGENTARA_PERMISSION_URL = url;
+    process.env.AGENTARA_PERMISSION_TOKEN = this._permissionFlow.apiToken;
   }
 
   private _handleInboundMessage = async (message: UserMessage) => {
@@ -503,6 +535,10 @@ class Kernel {
     }
     if (payload.action_name === "switch_submit") {
       await this._switchFlow.handleSubmit(payload);
+      return;
+    }
+    if (payload.action_name === PERMISSION_ACTION) {
+      await this._permissionFlow.handleDecide(payload);
       return;
     }
     this._logger.warn(
