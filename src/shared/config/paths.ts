@@ -50,6 +50,19 @@ export const outputs = join(workspace, "outputs");
  */
 export const workspaces = join(home, "workspaces");
 export const default_workspace = join(workspaces, "_default");
+
+/**
+ * Object-only cache of bare git mirrors, one per predefined repo name.
+ * Used as the `--reference` source when cloning repos into workspaces so
+ * object downloads are paid at most once across all workspaces. Never
+ * used as a worktree or user-facing workspace — agentara maintains these
+ * mirrors exclusively (clone, fetch). Losing this directory degrades to
+ * "every clone is a fresh full clone" — still correct, just slower.
+ */
+export const git_cache = join(home, "git-cache");
+export function resolveGitCachePath(repo_name: string) {
+  return join(git_cache, `${repo_name}.git`);
+}
 export function resolveWorkspacePathById(workspace_id: string) {
   return join(workspaces, workspace_id);
 }

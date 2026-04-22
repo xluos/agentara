@@ -14,7 +14,7 @@ import {
 } from "@/shared";
 
 import type { FeishuMessageChannel } from "../../community/feishu/messaging/message-channel";
-import type { GroupWorkspaceStore } from "../workspaces";
+import { ensureCachedMirror, type GroupWorkspaceStore } from "../workspaces";
 
 import {
   buildSetupCard,
@@ -428,10 +428,17 @@ export class SetupFlow {
     const alreadyCloned = existsSync(join(targetPath, ".git"));
 
     if (!alreadyCloned) {
-      const clone = await _execGit(
-        ["clone", sel.repo.git_url, sel.name],
-        workspacePath,
-      );
+      // Seed the shared object cache (or reuse the existing mirror) so
+      // this clone and every future one for the same repo pays the
+      // network/disk cost of the history at most once. If the cache
+      // can't be established (first-time network failure, disk full,
+      // etc.) we silently fall back to a plain clone — correctness
+      // over space.
+      const mirror = await ensureCachedMirror(sel.repo);
+      const cloneArgs = mirror
+        ? ["clone", "--reference", mirror, sel.repo.git_url, sel.name]
+        : ["clone", sel.repo.git_url, sel.name];
+      const clone = await _execGit(cloneArgs, workspacePath);
       if (!clone.ok) {
         return {
           name: sel.name,

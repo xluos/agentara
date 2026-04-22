@@ -52,6 +52,9 @@ class BootLoader {
     if (!existsSync(config.paths.default_workspace)) {
       mkdirSync(config.paths.default_workspace, { recursive: true });
     }
+    if (!existsSync(config.paths.git_cache)) {
+      mkdirSync(config.paths.git_cache, { recursive: true });
+    }
 
     if (!existsSync(config.paths.memory)) {
       mkdirSync(config.paths.memory, { recursive: true });

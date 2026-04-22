@@ -3,12 +3,14 @@ import { basename, join } from "node:path";
 
 import { formatRepoRef } from "@/kernel/repo-ref";
 import {
+  ensureCachedMirror,
   formatAheadBehind,
   listRepoSyncState,
   readRepoHead,
   syncWorkspace,
   type RepoSyncResult,
 } from "@/kernel/workspaces";
+import { loadPredefinedRepos } from "@/shared";
 
 import { buildCommandCard } from "./cards";
 import type {
@@ -289,8 +291,23 @@ const cloneHandler: CommandHandler = {
     if (existsSync(targetPath)) {
       return `❌ workspace 中已存在 \`${name}\`，请换个别名，或使用 \`/ls\` 查看已克隆的仓库。`;
     }
-    ctx.logger.info({ chat_id: chatId, url, name }, "cloning repo");
-    const result = await execGit(["clone", url, name], workspacePath);
+    // If this URL matches a predefined repo in REPOS.md, route the
+    // clone through the shared object cache so the history is fetched
+    // at most once across all workspaces. Arbitrary URLs still do a
+    // plain clone — maintaining a cache entry for a one-off repo
+    // isn't worth the bookkeeping.
+    const catalogMatch = _findPredefinedByUrl(url);
+    const mirror = catalogMatch
+      ? await ensureCachedMirror(catalogMatch)
+      : null;
+    const cloneArgs = mirror
+      ? ["clone", "--reference", mirror, url, name]
+      : ["clone", url, name];
+    ctx.logger.info(
+      { chat_id: chatId, url, name, using_cache: Boolean(mirror) },
+      "cloning repo",
+    );
+    const result = await execGit(cloneArgs, workspacePath);
     if (!result.ok) {
       return `❌ \`git clone\` 失败：\n\`\`\`\n${result.stderr || result.stdout}\n\`\`\``;
     }
@@ -598,4 +615,26 @@ function deriveRepoName(url: string): string {
   if (tail.endsWith("/")) tail = tail.slice(0, -1);
   const last = basename(tail);
   return last.endsWith(".git") ? last.slice(0, -4) : last;
+}
+
+/**
+ * Look up a predefined repo by its git URL, normalizing trailing `.git`
+ * and `/` so users copy-pasting the URL without the `.git` suffix still
+ * hit the cache. Returns `null` when the URL isn't in REPOS.md.
+ */
+function _findPredefinedByUrl(
+  url: string,
+): { name: string; git_url: string } | null {
+  const norm = _normalizeGitUrl(url);
+  for (const repo of loadPredefinedRepos()) {
+    if (_normalizeGitUrl(repo.git_url) === norm) return repo;
+  }
+  return null;
+}
+
+function _normalizeGitUrl(url: string): string {
+  let u = url.trim().toLowerCase();
+  if (u.endsWith("/")) u = u.slice(0, -1);
+  if (u.endsWith(".git")) u = u.slice(0, -4);
+  return u;
 }

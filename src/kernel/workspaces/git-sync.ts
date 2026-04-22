@@ -3,6 +3,8 @@ import { join } from "node:path";
 
 import { createLogger } from "@/shared";
 
+import { refreshCachedMirror } from "./git-cache";
+
 const _logger = createLogger("git-sync");
 
 export interface RepoSyncState {
@@ -115,6 +117,13 @@ export async function syncRepo(
       detail: _compressErr(fetch.stderr || fetch.stdout),
     };
   }
+
+  // Keep the shared object cache fresh so future `--reference` clones
+  // of this repo hit recent commits instead of re-downloading them.
+  // No-op when no cache mirror exists for this name. Best-effort —
+  // any failure is logged inside refreshCachedMirror and doesn't
+  // impact the workspace sync result.
+  await refreshCachedMirror(name, { timeoutMs: timeout });
 
   if (!branch) {
     const state = await _readState(repoPath);
