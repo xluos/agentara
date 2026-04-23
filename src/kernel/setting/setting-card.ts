@@ -7,6 +7,7 @@ import type {
   ButtonElement,
   Card,
   CheckerElement,
+  ColumnSetElement,
   Element,
   FormElement,
   InputElement,
@@ -63,6 +64,15 @@ export interface SettingMainCardOptions {
     workspace: Workspace;
     binding_count: number;
     is_current: boolean;
+    /** `_default` and similar reserved paths skip the delete button. */
+    is_protected: boolean;
+    /**
+     * Live branch name the workspace's active repo is currently on (from the
+     * on-disk HEAD). `null` when there's no active_repo or HEAD is detached.
+     * Resolved by the flow so the card never displays the stale stored
+     * `active_branch` hint.
+     */
+    active_branch_head: string | null;
   }>;
   current_chat_id?: string | null;
 }
@@ -117,14 +127,16 @@ export interface WorkspaceDetailCardOptions {
   bindings: GroupWorkspace[];
   repos: Array<{ name: string; branch: string | null; is_active: boolean }>;
   is_protected: boolean;
+  /** Live HEAD of the active repo; matches the per-repo row below. */
+  active_branch_head: string | null;
 }
 
 export function buildWorkspaceDetailCard(
   options: WorkspaceDetailCardOptions,
 ): Card {
-  const { workspace, bindings, repos, is_protected } = options;
+  const { workspace, bindings, repos, is_protected, active_branch_head } = options;
   const activeRepoLine = workspace.active_repo
-    ? `\`${formatRepoRef(workspace.active_repo, workspace.active_branch ?? "")}\``
+    ? `\`${formatRepoRef(workspace.active_repo, active_branch_head ?? "(游离)")}\``
     : "(未设置)";
 
   const elements: Element[] = [
@@ -225,19 +237,38 @@ export function buildWorkspaceDeleteConfirmCard(
 }
 
 /**
- * Terminal result card reused by every setting flow (save / delete). Thin
- * wrapper over the shared `buildResultCard` so we can tweak the title in
- * one place if needed later.
+ * Terminal result card reused by every setting flow (save / delete / error).
+ * Always appends a "返回设置面板" button so the user can re-enter the panel
+ * without having to re-send the slash command. Disable via `show_back: false`
+ * for transient fail states that shouldn't offer re-entry.
  */
 export function buildSettingResultCard(
   summary: string,
   detail: string[] = [],
+  options: { show_back?: boolean } = {},
 ): Card {
-  return buildResultCard({
+  const card = buildResultCard({
     title: "设置面板",
     summary,
     detail,
   });
+  if (options.show_back ?? true) {
+    const backBtn: ButtonElement = {
+      tag: "button",
+      name: "setting_result_back_btn",
+      text: { tag: "plain_text", content: "返回设置面板" },
+      type: "default",
+      width: "fill",
+      behaviors: [
+        {
+          type: "callback",
+          value: { action: SETTING_ACTION.mainBack },
+        },
+      ],
+    };
+    card.body.elements.push(backBtn);
+  }
+  return card;
 }
 
 function _buildConfigForm(options: SettingMainCardOptions): FormElement {
@@ -325,24 +356,48 @@ function _buildWorkspaceRow(entry: {
   workspace: Workspace;
   binding_count: number;
   is_current: boolean;
+  is_protected: boolean;
+  active_branch_head: string | null;
 }): Element {
-  const { workspace, binding_count, is_current } = entry;
-  const activeLine = workspace.active_repo
-    ? `\`${formatRepoRef(workspace.active_repo, workspace.active_branch ?? "")}\``
-    : "(未设置主仓库)";
-  const marks: string[] = [];
-  if (is_current) marks.push("当前群");
-  if (binding_count > 0) marks.push(`${binding_count} 群绑定`);
-  const summaryLine =
-    `- **${workspace.name}** <font color='grey'>\`${workspace.id}\`</font>  ` +
-    `${activeLine}  ·  活跃 ${_formatRelative(workspace.last_active_at)}` +
-    (marks.length ? `  ·  <font color='blue'>${marks.join(" / ")}</font>` : "");
+  const { workspace, binding_count, is_current, is_protected, active_branch_head } = entry;
+
+  // Primary line: workspace name in bold. The stable id moves to the meta
+  // line so the title stays short and scannable.
+  const titleEl = buildMarkdown(`**${workspace.name}**`);
+
+  // Secondary line: currently active repo/branch — the single most
+  // operationally relevant fact for each row. Branch comes from the on-disk
+  // HEAD (passed in as `active_branch_head`), matching `/status`: the stored
+  // `active_branch` is only a hint and drifts after the user `checkout`s.
+  const activeEl = buildMarkdown(
+    workspace.active_repo
+      ? `\`${formatRepoRef(workspace.active_repo, active_branch_head ?? "(游离)")}\``
+      : "<font color='grey'>未设置主仓库</font>",
+    { text_size: "notation" },
+  );
+
+  // Meta line: id + last-active badge + (optional) binding count + current
+  // chat tag. The active badge changes color by age so dormant workspaces
+  // are visually obvious without the user having to eyeball timestamps.
+  const activeBadge = _formatActiveBadge(workspace.last_active_at);
+  const metaParts: string[] = [
+    `<font color='grey'>ID \`${workspace.id}\`</font>`,
+    `<font color='${activeBadge.color}'>${activeBadge.text}</font>`,
+  ];
+  if (binding_count > 0) {
+    metaParts.push(`<font color='grey'>${binding_count} 群绑定</font>`);
+  }
+  if (is_current) {
+    metaParts.push("<font color='green'>**当前群**</font>");
+  }
+  const metaEl = buildMarkdown(metaParts.join(" · "), { text_size: "notation" });
 
   const detailBtn: ButtonElement = {
     tag: "button",
-    name: "setting_ws_detail_btn",
+    name: `setting_ws_detail_btn_${workspace.id}`,
     text: { tag: "plain_text", content: "详情" },
     type: "default",
+    width: "fill",
     behaviors: [
       {
         type: "callback",
@@ -352,6 +407,37 @@ function _buildWorkspaceRow(entry: {
         },
       },
     ],
+  };
+  const deleteBtn: ButtonElement = {
+    tag: "button",
+    name: `setting_ws_delete_btn_${workspace.id}`,
+    text: { tag: "plain_text", content: "删除" },
+    type: "danger",
+    width: "fill",
+    behaviors: [
+      {
+        type: "callback",
+        value: {
+          action: SETTING_ACTION.wsDeletePrompt,
+          workspace_id: workspace.id,
+        },
+      },
+    ],
+  };
+
+  // Buttons sit in a narrow right-hand column; nesting a tight column_set
+  // inside it keeps the two buttons visually adjacent (no big gap) while
+  // still letting the left column stretch to take all remaining width.
+  const buttonStack: ColumnSetElement = {
+    tag: "column_set",
+    flex_mode: "stretch",
+    horizontal_spacing: "4px",
+    columns: is_protected
+      ? [{ tag: "column", width: "weighted", weight: 1, elements: [detailBtn] }]
+      : [
+          { tag: "column", width: "weighted", weight: 1, elements: [detailBtn] },
+          { tag: "column", width: "weighted", weight: 1, elements: [deleteBtn] },
+        ],
   };
 
   return {
@@ -363,12 +449,15 @@ function _buildWorkspaceRow(entry: {
         tag: "column",
         width: "weighted",
         weight: 3,
-        elements: [buildMarkdown(summaryLine)],
+        vertical_spacing: "4px",
+        vertical_align: "center",
+        elements: [titleEl, activeEl, metaEl],
       },
       {
         tag: "column",
-        width: "80px",
-        elements: [detailBtn],
+        width: is_protected ? "90px" : "170px",
+        vertical_align: "center",
+        elements: [buttonStack],
       },
     ],
   };
@@ -443,10 +532,7 @@ function _buildDeleteConfirmRow(workspaceId: string): Element {
     behaviors: [
       {
         type: "callback",
-        value: {
-          action: SETTING_ACTION.wsDetail,
-          workspace_id: workspaceId,
-        },
+        value: { action: SETTING_ACTION.mainBack },
       },
     ],
   };
@@ -490,4 +576,26 @@ function _formatRelative(ms: number): string {
   if (diff < 86_400_000) return `${Math.floor(diff / 3_600_000)} 小时前`;
   if (diff < 30 * 86_400_000) return `${Math.floor(diff / 86_400_000)} 天前`;
   return dayjs(ms).format("YYYY-MM-DD");
+}
+
+const DAY_MS = 86_400_000;
+
+/**
+ * Color-coded freshness label for a workspace's `last_active_at`.
+ *
+ * - ≤ 3 days → green "活跃 …" — recently used, safe.
+ * - ≤ 30 days → grey "活跃 …" — cold but not abandoned.
+ * - > 30 days → red "超过 N 个月未活跃" — explicit warning to consider pruning.
+ */
+function _formatActiveBadge(ms: number): { text: string; color: string } {
+  if (!ms) return { text: "活跃未知", color: "grey" };
+  const diff = Date.now() - ms;
+  if (diff < 3 * DAY_MS) {
+    return { text: `活跃 ${_formatRelative(ms)}`, color: "green" };
+  }
+  if (diff < 30 * DAY_MS) {
+    return { text: `活跃 ${_formatRelative(ms)}`, color: "grey" };
+  }
+  const months = Math.max(1, Math.floor(diff / (30 * DAY_MS)));
+  return { text: `超过 ${months} 个月未活跃`, color: "red" };
 }

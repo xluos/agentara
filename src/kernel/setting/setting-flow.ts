@@ -85,11 +85,15 @@ export class SettingFlow {
         replyInThread: false,
       });
     } catch (err) {
-      this._logger.error({ err, chat_id: chatId }, "failed to render setting card");
-      await this._replyText(
-        message,
-        `❌ 渲染设置面板失败：${(err as Error).message}`,
+      const detail = _summarizeFeishuError(err);
+      this._logger.error(
+        { err: detail, chat_id: chatId },
+        "failed to render setting card",
       );
+      const reason = detail.msg
+        ? `${detail.msg}${detail.code ? ` (code ${detail.code})` : ""}`
+        : (err as Error).message;
+      await this._replyText(message, `❌ 渲染设置面板失败：${reason}`);
     }
   }
 
@@ -262,6 +266,9 @@ export class SettingFlow {
       .listBindings()
       .filter((b) => b.workspace_id === workspaceId);
     const repos = _scanRepos(workspace);
+    const activeBranchHead = workspace.active_repo
+      ? readRepoHead(join(workspace.path, workspace.active_repo)) ?? null
+      : null;
     await this._tryUpdateCard(
       channel,
       payload.message_id,
@@ -270,6 +277,7 @@ export class SettingFlow {
         bindings,
         repos,
         is_protected: workspace.path === config.paths.default_workspace,
+        active_branch_head: activeBranchHead,
       }),
       "ws-detail",
     );
@@ -392,6 +400,10 @@ export class SettingFlow {
         workspace: ws,
         binding_count: bindingCounts.get(ws.id) ?? 0,
         is_current: currentBinding?.workspace_id === ws.id,
+        is_protected: ws.path === config.paths.default_workspace,
+        active_branch_head: ws.active_repo
+          ? readRepoHead(join(ws.path, ws.active_repo)) ?? null
+          : null,
       })),
       current_chat_id: currentChatId,
     });
@@ -421,7 +433,7 @@ export class SettingFlow {
       await channel.updateRawCard(messageId, card);
     } catch (err) {
       this._logger.error(
-        { err, stage, message_id: messageId },
+        { err: _summarizeFeishuError(err), stage, message_id: messageId },
         "setting updateRawCard failed",
       );
     }
@@ -500,3 +512,28 @@ function _scanRepos(workspace: Workspace): RepoSummary[] {
 // deep paths — not used today but keeps the barrel clean if we ever surface
 // binding details publicly.
 export type { GroupWorkspace };
+
+/**
+ * Extract the code/msg/status trio from a Feishu/axios error so logs and
+ * user-facing messages carry the actual server reason instead of the generic
+ * "Request failed with status code 400".
+ */
+function _summarizeFeishuError(err: unknown): {
+  code?: number;
+  msg?: string;
+  status?: number;
+} {
+  if (!err || typeof err !== "object") return {};
+  const candidate = err as {
+    response?: {
+      status?: number;
+      data?: { code?: number; msg?: string };
+    };
+    message?: string;
+  };
+  return {
+    code: candidate.response?.data?.code,
+    msg: candidate.response?.data?.msg ?? candidate.message,
+    status: candidate.response?.status,
+  };
+}

@@ -80,6 +80,8 @@ describe("buildSettingMainCard", () => {
           workspace: makeWorkspace(),
           binding_count: 2,
           is_current: true,
+          is_protected: false,
+          active_branch_head: "dev",
         },
       ],
     });
@@ -93,6 +95,40 @@ describe("buildSettingMainCard", () => {
     expect(JSON.stringify(detailBtn)).toContain("ws_abc");
     expect(stringifyCard(card)).toContain("当前群");
     expect(stringifyCard(card)).toContain("2 群绑定");
+  });
+
+  test("each non-protected row also carries an inline delete button", () => {
+    const card = buildSettingMainCard({
+      agent: { active_type: "codex", available_types: ["codex"] },
+      config_values: {
+        agent_model: "",
+        codex_isolate_host_env: false,
+        max_retries: 1,
+      },
+      workspaces: [
+        {
+          workspace: makeWorkspace({ id: "ws_del1", name: "one" }),
+          binding_count: 0,
+          is_current: false,
+          is_protected: false,
+          active_branch_head: "main",
+        },
+        {
+          workspace: makeWorkspace({ id: "ws_prot", name: "_default" }),
+          binding_count: 0,
+          is_current: false,
+          is_protected: true,
+          active_branch_head: null,
+        },
+      ],
+    });
+    const json = stringifyCard(card);
+    // Non-protected row gets a delete button whose callback targets its id.
+    expect(json).toContain(`setting_ws_delete_btn_ws_del1`);
+    expect(json).toContain(SETTING_ACTION.wsDeletePrompt);
+    // Protected row keeps its detail button but omits the delete button.
+    expect(json).toContain(`setting_ws_detail_btn_ws_prot`);
+    expect(json).not.toContain(`setting_ws_delete_btn_ws_prot`);
   });
 });
 
@@ -118,6 +154,7 @@ describe("buildWorkspaceDetailCard", () => {
         { name: "new-api", branch: "main", is_active: false },
       ],
       is_protected: false,
+      active_branch_head: "dev",
     });
     const json = stringifyCard(card);
     expect(json).toContain("oc_xx");
@@ -134,6 +171,7 @@ describe("buildWorkspaceDetailCard", () => {
       bindings: [],
       repos: [],
       is_protected: true,
+      active_branch_head: null,
     });
     const json = stringifyCard(card);
     expect(json).toContain(SETTING_ACTION.mainBack);
@@ -152,7 +190,9 @@ describe("buildWorkspaceDeleteConfirmCard", () => {
     expect(json).toContain("解绑");
     expect(json).toContain("3");
     expect(json).toContain("12");
-    expect(json).toContain(SETTING_ACTION.wsDetail); // cancel returns to detail
+    // Cancel returns to the main panel regardless of whether the user came
+    // from the list or the detail view.
+    expect(json).toContain(SETTING_ACTION.mainBack);
     expect(json).toContain(SETTING_ACTION.wsDeleteApply);
   });
 });
