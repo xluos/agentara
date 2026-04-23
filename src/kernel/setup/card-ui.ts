@@ -158,7 +158,17 @@ export function inferToneFromSummary(summary: string): CardTone {
 }
 
 function summarizeForSubtitle(summary: string): string {
-  return summary.replace(/^[^\p{L}\p{N}`]+/u, "").slice(0, 80);
+  // Feishu doesn't re-parse `<at>` tags inside `<font>` wrappers, which is
+  // what `buildCardIntro` uses for subtitles — leaving the tag in would
+  // dump its raw `at id=...` attribute text into the card. Strip mentions
+  // here so the subtitle stays plain. Also collapse the resulting double
+  // spaces so it reads cleanly.
+  return summary
+    .replace(/<at\b[^>]*>\s*<\/at>/g, "")
+    .replace(/^[^\p{L}\p{N}`]+/u, "")
+    .replace(/\s+/g, " ")
+    .trim()
+    .slice(0, 80);
 }
 
 /**
