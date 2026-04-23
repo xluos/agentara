@@ -1,5 +1,14 @@
-import { existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
-import { join } from "node:path";
+import {
+  existsSync,
+  lstatSync,
+  mkdirSync,
+  readlinkSync,
+  renameSync,
+  rmSync,
+  symlinkSync,
+  writeFileSync,
+} from "node:fs";
+import { join, sep } from "node:path";
 
 import dayjs from "dayjs";
 import { eq, inArray, like, or } from "drizzle-orm";
@@ -411,6 +420,83 @@ export class GroupWorkspaceStore {
       mkdirSync(workspacePath, { recursive: true });
       this._logger.info(`Created workspace: ${workspacePath}`);
     }
+    this._linkGlobalAssets(workspacePath);
+  }
+
+  /**
+   * Symlink the shared instruction + memory surface from agentara home into
+   * every workspace root. Without this, Codex (whose `@import` resolver uses
+   * cwd as baseDir, and whose own auto-memory writes under `<cwd>/memory/`)
+   * ends up with a stale `<!-- file not found -->` AGENTS.md at the home
+   * level and a per-workspace memory island that never reaches the global
+   * SOUL/USER context. Symlinking is chosen over copying so writes on either
+   * side are seen by the other.
+   *
+   * Only `.claude/skills/` is shared from `.claude/` — the rest (runtime
+   * state, local settings, todos) stays per-workspace to avoid cross-session
+   * contention.
+   */
+  private _linkGlobalAssets(workspacePath: string): void {
+    // Never clobber agentara home itself; an in-home "workspace" would
+    // recurse onto its own files.
+    if (workspacePath === config.paths.home) return;
+    // Only manage workspaces under the managed workspaces root. If a user
+    // points at an arbitrary path, leave it alone.
+    if (!workspacePath.startsWith(config.paths.workspaces + sep)) return;
+
+    const linkSpecs: Array<{ src: string; dst: string }> = [
+      { src: join(config.paths.home, "CLAUDE.md"), dst: join(workspacePath, "CLAUDE.md") },
+      { src: config.paths.repos_md, dst: join(workspacePath, "REPOS.md") },
+      { src: config.paths.memory, dst: join(workspacePath, "memory") },
+      {
+        src: config.paths.skills,
+        dst: join(workspacePath, ".claude", "skills"),
+      },
+    ];
+
+    for (const { src, dst } of linkSpecs) {
+      if (!existsSync(src)) continue;
+      const parent = join(dst, "..");
+      if (!existsSync(parent)) {
+        try {
+          mkdirSync(parent, { recursive: true });
+        } catch (err) {
+          this._logger.warn({ err, parent }, "failed to create parent dir for symlink");
+          continue;
+        }
+      }
+      this._ensureSymlink(src, dst);
+    }
+  }
+
+  /**
+   * Idempotently ensure `dst` is a symlink pointing at `src`. If `dst` is
+   * already a symlink to the same target, no-op. If it's a symlink to a
+   * different target, replace it. If it's a real file or directory, move it
+   * aside to `<dst>.bak.<timestamp>` before creating the link, so we never
+   * silently destroy existing content.
+   */
+  private _ensureSymlink(src: string, dst: string): void {
+    try {
+      const st = lstatSync(dst, { throwIfNoEntry: false });
+      if (st) {
+        if (st.isSymbolicLink()) {
+          if (readlinkSync(dst) === src) return;
+          rmSync(dst);
+        } else {
+          const backup = `${dst}.bak.${Date.now()}`;
+          renameSync(dst, backup);
+          this._logger.info(
+            { dst, backup },
+            "backed up existing workspace asset before linking",
+          );
+        }
+      }
+      symlinkSync(src, dst);
+      this._logger.info({ src, dst }, "linked global asset into workspace");
+    } catch (err) {
+      this._logger.warn({ err, src, dst }, "failed to link global asset");
+    }
   }
 
   private _newWorkspaceId(): string {
@@ -446,6 +532,7 @@ export class GroupWorkspaceStore {
     for (const row of rows) {
       const desired = config.paths.resolveWorkspacePathById(row.id);
       if (row.path === desired && existsSync(desired)) {
+        this._linkGlobalAssets(desired);
         this._writeMetaFile(row);
         continue;
       }
