@@ -18,6 +18,9 @@ import {
 } from "@/kernel/workspaces";
 import { loadPredefinedRepos } from "@/shared";
 
+import type { Card, Element } from "../../community/feishu/messaging/types";
+import { buildMarkdown } from "../setup/card-ui";
+
 import { buildCommandCard } from "./cards";
 import type {
   CardCommandResult,
@@ -634,28 +637,128 @@ const unmuteHandler = buildMuteHandler(
   true,
 );
 
+/**
+ * Grouped `/help` card.
+ *
+ * A flat list of 15+ commands is noisy, so commands are bucketed by intent
+ * and rendered as plain bullet lists under a bold group heading. No intro
+ * text, no collapsible panels, no nested frames — just readable markdown.
+ */
+interface HelpCommand {
+  usage: string;
+  note: string;
+}
+interface HelpGroup {
+  title: string;
+  commands: HelpCommand[];
+}
+
+const HELP_GROUPS: HelpGroup[] = [
+  {
+    title: "🚀 常用",
+    commands: [
+      { usage: "/setting", note: "打开设置面板（全局配置 + workspace 管理）" },
+      { usage: "/new <消息>", note: "开启新会话 + 新话题（须在主群、非话题内）" },
+      { usage: "/stop", note: "取消当前 session 正在执行的任务" },
+      { usage: "/help", note: "显示本消息" },
+    ],
+  },
+  {
+    title: "📦 Workspace",
+    commands: [
+      { usage: "/status", note: "查看当前群的绑定及已克隆的仓库" },
+      { usage: "/ls", note: "列出当前群 workspace 下的所有仓库" },
+      { usage: "/setup", note: "打开 workspace 配置卡片（仅群聊）" },
+      { usage: "/switch", note: "打开 workspace 切换卡片（群聊 & 单聊）" },
+      { usage: "/bind [workspace-id]", note: "绑定当前群到一个 workspace" },
+      { usage: "/unbind", note: "清除当前群的绑定（回退到默认 workspace）" },
+      { usage: "/workspaces", note: "/setting 的快捷入口" },
+    ],
+  },
+  {
+    title: "🔀 仓库操作",
+    commands: [
+      { usage: "/sync", note: "对当前 workspace 下每个仓库 fetch + 快进拉取" },
+      { usage: "/clone <git-url> [别名]", note: "克隆仓库到当前群 workspace" },
+      { usage: "/checkout <分支>", note: "切换当前活跃仓库的分支" },
+    ],
+  },
+  {
+    title: "🤖 Agent",
+    commands: [
+      {
+        usage: "/agent [list|use <type>|reset]",
+        note: "查看或切换运行时默认 Agent",
+      },
+      { usage: "/agents", note: "查看可选 Agent 列表" },
+    ],
+  },
+  {
+    title: "👥 群 / 权限",
+    commands: [
+      {
+        usage: "/group <群名> @user...",
+        note: "机器人建群并自动 /setup（仅单聊）",
+      },
+      { usage: "/ungroup", note: "解散机器人创建的群" },
+      { usage: "/allow @user...", note: "把 @ 的人加到机器人白名单" },
+    ],
+  },
+  {
+    title: "🔕 话题响应",
+    commands: [
+      { usage: "/mute", note: "让当前话题不再自动响应 @ 提醒" },
+      { usage: "/unmute", note: "恢复当前话题的自动响应" },
+    ],
+  },
+];
+
+function _buildHelpCard(): Card {
+  const elements: Element[] = [];
+  for (const group of HELP_GROUPS) {
+    const lines = [
+      `**${group.title}**`,
+      ...group.commands.map((c) => `- ${c.usage} — ${c.note}`),
+    ].join("\n");
+    elements.push(buildMarkdown(lines));
+  }
+  return {
+    schema: "2.0",
+    config: {
+      streaming_mode: false,
+      update_multi: true,
+      width_mode: "fill",
+      summary: { content: "❓ 可用命令" },
+    },
+    body: {
+      padding: "12px 16px 16px 16px",
+      vertical_spacing: "12px",
+      elements,
+    },
+  };
+}
+
+function _buildHelpFallbackText(): string {
+  const lines: string[] = ["可用命令"];
+  for (const group of HELP_GROUPS) {
+    lines.push("", group.title);
+    for (const c of group.commands) {
+      lines.push(`- ${c.usage} — ${c.note}`);
+    }
+  }
+  return lines.join("\n");
+}
+
 export const helpHandler: CommandHandler = {
   name: "help",
   description: "/help — 显示所有可用命令",
   async execute() {
-    return cardReply("可用命令", [], {
-      sections: [
-        {
-          title: "命令",
-          lines: [
-            ...BUILTIN_COMMANDS.map((h) => `- ${h.description}`),
-            "- /help — 显示本消息",
-            "- /stop — 取消当前 session 正在执行的任务",
-            "- /setting — 打开设置面板（全局配置 + workspace 管理）",
-            "- /workspaces — 打开设置面板（快捷入口，等价于 /setting）",
-            "- /setup — 打开 workspace 配置卡片（仅群聊）",
-            "- /switch — 打开 workspace 切换卡片（群聊 & 单聊）",
-            "- /group <群名> @user... — 机器人建群并自动 /setup（仅单聊）",
-            "- /new <消息> — 开启新会话 + 新话题（须在主群，非话题内）",
-          ],
-        },
-      ],
-    });
+    const result: CardCommandResult = {
+      kind: "card",
+      card: _buildHelpCard(),
+      fallback_text: _buildHelpFallbackText(),
+    };
+    return result;
   },
 };
 
