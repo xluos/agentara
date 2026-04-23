@@ -1,11 +1,12 @@
-import { existsSync, mkdirSync, renameSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import dayjs from "dayjs";
-import { eq } from "drizzle-orm";
+import { eq, inArray, like, or } from "drizzle-orm";
 
 import type { DrizzleDB } from "@/data";
-import { groupWorkspaces, workspaces } from "@/kernel/sessioning/data";
+import { groupWorkspaces, sessions, workspaces } from "@/kernel/sessioning/data";
+import { tasks } from "@/kernel/tasking/data";
 import { config, createLogger, uuid, type GroupWorkspace, type Workspace } from "@/shared";
 
 import { readRepoHead } from "./git-sync";
@@ -154,6 +155,7 @@ export class GroupWorkspaceStore {
           updated_at: now,
         })
         .run();
+      this.touchLastActive(workspace.id, now);
       this._writeMetaFile(workspace);
       return {
         chat_id: chatId,
@@ -175,6 +177,7 @@ export class GroupWorkspaceStore {
       })
       .where(eq(groupWorkspaces.chat_id, chatId))
       .run();
+    this.touchLastActive(workspace.id, now);
     this._writeMetaFile(workspace);
     return {
       ...existing,
@@ -226,6 +229,7 @@ export class GroupWorkspaceStore {
     if (!existsSync(binding.workspace_path)) {
       mkdirSync(binding.workspace_path, { recursive: true });
     }
+    this.touchLastActive(binding.workspace_id);
     const envExtras: Record<string, string> = {};
     if (binding.active_repo) {
       envExtras.DEV_ASSETS_PRIMARY_REPO = binding.active_repo;
@@ -241,6 +245,97 @@ export class GroupWorkspaceStore {
       envExtras,
       binding,
     };
+  }
+
+  /**
+   * Bump `workspaces.last_active_at` for the given workspace. Cheap update —
+   * leaves `updated_at` alone so the two columns stay semantically distinct
+   * (`updated_at` = row mutated, `last_active_at` = workspace was used).
+   */
+  touchLastActive(workspaceId: string, ts: number = Date.now()): void {
+    this._db
+      .update(workspaces)
+      .set({ last_active_at: ts })
+      .where(eq(workspaces.id, workspaceId))
+      .run();
+  }
+
+  /**
+   * Fully remove a workspace: tasks → sessions → bindings → row → on-disk
+   * directory. The shared git-cache at `$AGENTARA_HOME/git-cache/` is left
+   * intact so other workspaces keep benefiting from it. Refuses to touch
+   * the reserved `_default` fallback directory.
+   */
+  deleteWorkspace(workspaceId: string): WorkspaceDeleteResult {
+    const workspace = this.getWorkspace(workspaceId);
+    if (!workspace) {
+      throw new WorkspaceNotFoundError(workspaceId);
+    }
+    if (workspace.path === config.paths.default_workspace) {
+      throw new WorkspaceProtectedError(workspaceId);
+    }
+
+    const sessionRows = this._db
+      .select({ id: sessions.id })
+      .from(sessions)
+      .where(
+        or(
+          eq(sessions.cwd, workspace.path),
+          like(sessions.cwd, `${workspace.path}/%`),
+        ),
+      )
+      .all();
+    const sessionIds = sessionRows.map((r) => r.id);
+
+    let removedTasks = 0;
+    if (sessionIds.length > 0) {
+      const taskRows = this._db
+        .select({ id: tasks.id })
+        .from(tasks)
+        .where(inArray(tasks.session_id, sessionIds))
+        .all();
+      removedTasks = taskRows.length;
+      if (removedTasks > 0) {
+        this._db.delete(tasks).where(inArray(tasks.session_id, sessionIds)).run();
+      }
+      this._db.delete(sessions).where(inArray(sessions.id, sessionIds)).run();
+    }
+
+    const bindingRows = this._db
+      .select({ chat_id: groupWorkspaces.chat_id })
+      .from(groupWorkspaces)
+      .where(eq(groupWorkspaces.workspace_id, workspaceId))
+      .all();
+    this._db
+      .delete(groupWorkspaces)
+      .where(eq(groupWorkspaces.workspace_id, workspaceId))
+      .run();
+    this._db.delete(workspaces).where(eq(workspaces.id, workspaceId)).run();
+
+    let removedDirectory = false;
+    try {
+      if (existsSync(workspace.path)) {
+        rmSync(workspace.path, { recursive: true, force: true });
+        removedDirectory = true;
+      }
+    } catch (err) {
+      this._logger.error(
+        { err, workspace_id: workspaceId, path: workspace.path },
+        "failed to remove workspace directory; db rows already gone",
+      );
+    }
+
+    const result: WorkspaceDeleteResult = {
+      workspace_id: workspaceId,
+      workspace_name: workspace.name,
+      workspace_path: workspace.path,
+      removed_bindings: bindingRows.length,
+      removed_sessions: sessionIds.length,
+      removed_tasks: removedTasks,
+      removed_directory: removedDirectory,
+    };
+    this._logger.info(result, "workspace deleted");
+    return result;
   }
 
   private _defaultResolution(
@@ -304,6 +399,7 @@ export class GroupWorkspaceStore {
       active_branch: null,
       created_at: now,
       updated_at: now,
+      last_active_at: now,
     };
     this._db.insert(workspaces).values(workspace).run();
     this._writeMetaFile(workspace);
@@ -427,6 +523,39 @@ export class GroupWorkspaceStore {
         "failed to write workspace meta file",
       );
     }
+  }
+}
+
+/**
+ * Breakdown of what {@link GroupWorkspaceStore.deleteWorkspace} actually
+ * removed. The card uses these counts in the result summary so users see
+ * exactly how much state went away.
+ */
+export interface WorkspaceDeleteResult {
+  workspace_id: string;
+  workspace_name: string;
+  workspace_path: string;
+  removed_bindings: number;
+  removed_sessions: number;
+  removed_tasks: number;
+  removed_directory: boolean;
+}
+
+/** Thrown when the caller asks to delete a workspace id that doesn't exist. */
+export class WorkspaceNotFoundError extends Error {
+  constructor(readonly workspace_id: string) {
+    super(`workspace id "${workspace_id}" does not exist`);
+    this.name = "WorkspaceNotFoundError";
+  }
+}
+
+/** Thrown when the caller asks to delete the reserved default workspace. */
+export class WorkspaceProtectedError extends Error {
+  constructor(readonly workspace_id: string) {
+    super(
+      `workspace "${workspace_id}" is protected (default fallback) and cannot be deleted`,
+    );
+    this.name = "WorkspaceProtectedError";
   }
 }
 

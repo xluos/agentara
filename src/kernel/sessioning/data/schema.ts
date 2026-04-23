@@ -57,6 +57,13 @@ export const workspaces = sqliteTable(
     created_at: integer("created_at").notNull(),
     /** Epoch milliseconds when the workspace was last updated. */
     updated_at: integer("updated_at").notNull(),
+    /**
+     * Epoch milliseconds of the last time any chat bound to this workspace
+     * dispatched a message, re-bound, or mutated active state. Distinct from
+     * `updated_at` (which only moves on explicit row writes): this tracks
+     * usage, so the `/setting` panel can surface dormant workspaces.
+     */
+    last_active_at: integer("last_active_at").notNull(),
   },
   (table) => ({
     path_unique: uniqueIndex("workspaces_path_unique").on(table.path),

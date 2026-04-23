@@ -646,6 +646,8 @@ export const helpHandler: CommandHandler = {
             ...BUILTIN_COMMANDS.map((h) => `- ${h.description}`),
             "- /help — 显示本消息",
             "- /stop — 取消当前 session 正在执行的任务",
+            "- /setting — 打开设置面板（全局配置 + workspace 管理）",
+            "- /workspaces — 打开设置面板（快捷入口，等价于 /setting）",
             "- /setup — 打开 workspace 配置卡片（仅群聊）",
             "- /switch — 打开 workspace 切换卡片（群聊 & 单聊）",
             "- /group <群名> @user... — 机器人建群并自动 /setup（仅单聊）",

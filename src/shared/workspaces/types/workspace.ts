@@ -26,5 +26,7 @@ export const Workspace = z.object({
   created_at: z.number(),
   /** Epoch ms when the workspace was last updated. */
   updated_at: z.number(),
+  /** Epoch ms of the last dispatch/bind/active-state mutation. */
+  last_active_at: z.number(),
 });
 export interface Workspace extends z.infer<typeof Workspace> {}

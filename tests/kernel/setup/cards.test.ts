@@ -97,6 +97,7 @@ describe("buildSwitchCard", () => {
           active_branch: "dev",
           created_at: Date.now(),
           updated_at: Date.now(),
+          last_active_at: Date.now(),
         },
       ],
       current: {

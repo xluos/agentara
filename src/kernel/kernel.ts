@@ -48,6 +48,7 @@ import { MultiChannelMessageGateway } from "./messaging";
 import { PERMISSION_ACTION, PermissionFlow } from "./permission";
 import { SessionManager } from "./sessioning";
 import * as sessioningSchema from "./sessioning/data";
+import { SettingFlow } from "./setting/setting-flow";
 import { SetupFlow } from "./setup/setup-flow";
 import { SwitchFlow } from "./setup/switch-flow";
 import { TaskDispatcher } from "./tasking";
@@ -70,6 +71,7 @@ class Kernel {
   private _feishuChannels = new Map<string, FeishuMessageChannel>();
   private _setupFlow!: SetupFlow;
   private _switchFlow!: SwitchFlow;
+  private _settingFlow!: SettingFlow;
   private _groupFlow!: GroupFlow;
   private _permissionFlow!: PermissionFlow;
   private _codexResumeRestarts = new Map<
@@ -86,6 +88,7 @@ class Kernel {
     this._initMessageGateway();
     this._initSetupFlow();
     this._initSwitchFlow();
+    this._initSettingFlow();
     this._initGroupFlow();
     this._initPermissionFlow();
     this._initServer();
@@ -209,6 +212,14 @@ class Kernel {
     });
   }
 
+  private _initSettingFlow(): void {
+    this._settingFlow = new SettingFlow({
+      workspaceStore: this._workspaceStore,
+      feishuChannels: this._feishuChannels,
+      db: this._database.db,
+    });
+  }
+
   private _initPermissionFlow(): void {
     this._permissionFlow = new PermissionFlow({
       feishuChannels: this._feishuChannels,
@@ -281,6 +292,14 @@ class Kernel {
     // both group chats and P2P since switching binding only touches metadata.
     if (text === "/switch") {
       await this._switchFlow.start(message);
+      return;
+    }
+
+    // Handle /setting + /workspaces commands (kernel-owned — interactive
+    // panel). Both open the same main card; the name duplication is just a
+    // convenience shortcut for users who only want the workspace view.
+    if (text === "/setting" || text === "/workspaces") {
+      await this._settingFlow.start(message);
       return;
     }
 
@@ -560,6 +579,10 @@ class Kernel {
     }
     if (payload.action_name === CODEX_RESUME_RESTART_ACTION) {
       await this._handleCodexResumeRestart(payload);
+      return;
+    }
+    if (payload.action_name.startsWith("setting_")) {
+      await this._settingFlow.handleAction(payload);
       return;
     }
     this._logger.warn(
