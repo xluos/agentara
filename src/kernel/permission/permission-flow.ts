@@ -82,6 +82,14 @@ export class PermissionFlow {
   private readonly _feishuChannels: Map<string, FeishuMessageChannel>;
   private readonly _pending = new Map<string, PendingEntry>();
   private readonly _timeoutMs: number;
+  /**
+   * Per-session allow list populated when the user picks "allow this tool
+   * for the whole session" on a permission card. Keyed by `session_id`;
+   * each value is the set of tool names approved for that session. In-memory
+   * only — a kernel restart drops the list so trust never survives across
+   * boots.
+   */
+  private readonly _sessionAllowlist = new Map<string, Set<string>>();
 
   /**
    * Process-lifetime shared secret used by the MCP stdio subprocess to
@@ -131,6 +139,19 @@ export class PermissionFlow {
       throw new Error(
         `Permission request for unknown channel_id=${params.channel_id}`,
       );
+    }
+    // Session-wide allow short-circuit: if the user has already opted to
+    // trust this tool for the whole session, skip the card and auto-approve.
+    if (this._isSessionAllowed(params.session_id, params.tool_name)) {
+      this._logger.info(
+        { session_id: params.session_id, tool_name: params.tool_name },
+        "permission auto-allowed from session allowlist",
+      );
+      return {
+        behavior: "allow",
+        updated_input: params.tool_input,
+        decided_by: "user",
+      };
     }
     const requestId = uuid();
     const card = buildPermissionCard({
@@ -246,18 +267,31 @@ export class PermissionFlow {
     }
 
     const value = payload.value as unknown as PermissionCallbackValue;
-    const decision: "allow" | "deny" =
-      value?.decision === "allow" ? "allow" : "deny";
+    const rawDecision = value?.decision;
+    const decision: "allow" | "deny" | "allow_session" =
+      rawDecision === "allow" || rawDecision === "allow_session"
+        ? rawDecision
+        : "deny";
 
     this._pending.delete(payload.message_id);
     clearTimeout(entry.timeout);
 
+    if (decision === "allow_session") {
+      this._rememberSessionAllow(entry.session_id, entry.tool_name);
+    }
+
+    const outcome =
+      decision === "allow"
+        ? "allowed"
+        : decision === "allow_session"
+          ? "allowed_session"
+          : "denied";
     await this._tryUpdateCard(
       payload.channel_id,
       payload.message_id,
       buildPermissionResultCard({
         tool_name: entry.tool_name,
-        outcome: decision === "allow" ? "allowed" : "denied",
+        outcome,
         decided_by_open_id: payload.operator_open_id,
       }),
       "final-result",
@@ -274,11 +308,33 @@ export class PermissionFlow {
     );
 
     entry.resolve({
-      behavior: decision,
+      behavior: decision === "deny" ? "deny" : "allow",
       message:
         decision === "deny" ? "Permission denied by the user." : undefined,
       decided_by: "user",
     });
+  }
+
+  /**
+   * Forget every tool remembered for the given session. Call on session
+   * teardown if you want to release memory eagerly; otherwise the map is
+   * cleared on the next kernel restart.
+   */
+  clearSession(sessionId: string): void {
+    this._sessionAllowlist.delete(sessionId);
+  }
+
+  private _isSessionAllowed(sessionId: string, toolName: string): boolean {
+    return this._sessionAllowlist.get(sessionId)?.has(toolName) === true;
+  }
+
+  private _rememberSessionAllow(sessionId: string, toolName: string): void {
+    let set = this._sessionAllowlist.get(sessionId);
+    if (!set) {
+      set = new Set();
+      this._sessionAllowlist.set(sessionId, set);
+    }
+    set.add(toolName);
   }
 
   /**

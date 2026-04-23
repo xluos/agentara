@@ -133,6 +133,111 @@ describe("PermissionFlow", () => {
     expect(decision.decided_by).toBe("timeout");
   });
 
+  test("allow_session remembers the tool and skips the card next time", async () => {
+    const { fake, channel } = _makeChannel("card_msg_session_1");
+    const flow = new PermissionFlow({
+      feishuChannels: new Map([["ch_1", channel]]),
+    });
+
+    // First call prompts; user picks "allow for this session".
+    const first = flow.request({
+      session_id: "s-session",
+      channel_id: "ch_1",
+      chat_id: "oc_chat",
+      initiator_open_id: "ou_alice",
+      tool_name: "Bash",
+      tool_input: { command: "ls" },
+    });
+    await Promise.resolve();
+    await flow.handleDecide(
+      _makePayload({
+        message_id: "card_msg_session_1",
+        operator_open_id: "ou_alice",
+        value: {
+          action: "permission_decide",
+          request_id: "r1",
+          decision: "allow_session",
+        },
+      }),
+    );
+    const firstDecision = await first;
+    expect(firstDecision.behavior).toBe("allow");
+
+    // A second call for the same tool on the same session must resolve
+    // immediately with `allow` and NOT touch the channel at all.
+    const cardsBefore = fake.sentCards.length;
+    const second = await flow.request({
+      session_id: "s-session",
+      channel_id: "ch_1",
+      chat_id: "oc_chat",
+      initiator_open_id: "ou_alice",
+      tool_name: "Bash",
+      tool_input: { command: "pwd" },
+    });
+    expect(second.behavior).toBe("allow");
+    expect(second.decided_by).toBe("user");
+    expect(fake.sentCards.length).toBe(cardsBefore);
+
+    // Different tool still prompts — allowlist is per-tool.
+    const third = flow.request({
+      session_id: "s-session",
+      channel_id: "ch_1",
+      chat_id: "oc_chat",
+      initiator_open_id: "ou_alice",
+      tool_name: "Edit",
+      tool_input: {},
+    });
+    await Promise.resolve();
+    expect(fake.sentCards.length).toBe(cardsBefore + 1);
+    // Clean up the dangling request so the test exits promptly.
+    flow.clearSession("s-session");
+    void third.catch(() => {});
+  });
+
+  test("clearSession forgets previously allowed tools", async () => {
+    const { fake, channel } = _makeChannel("card_msg_clear_1");
+    const flow = new PermissionFlow({
+      feishuChannels: new Map([["ch_1", channel]]),
+    });
+    const first = flow.request({
+      session_id: "s-clear",
+      channel_id: "ch_1",
+      chat_id: "oc_chat",
+      initiator_open_id: "ou_alice",
+      tool_name: "Bash",
+      tool_input: {},
+    });
+    await Promise.resolve();
+    await flow.handleDecide(
+      _makePayload({
+        message_id: "card_msg_clear_1",
+        operator_open_id: "ou_alice",
+        value: {
+          action: "permission_decide",
+          request_id: "r2",
+          decision: "allow_session",
+        },
+      }),
+    );
+    await first;
+
+    flow.clearSession("s-clear");
+
+    // After clearing, the next call must prompt again (card sent).
+    const cardsBefore = fake.sentCards.length;
+    const next = flow.request({
+      session_id: "s-clear",
+      channel_id: "ch_1",
+      chat_id: "oc_chat",
+      initiator_open_id: "ou_alice",
+      tool_name: "Bash",
+      tool_input: {},
+    });
+    await Promise.resolve();
+    expect(fake.sentCards.length).toBe(cardsBefore + 1);
+    void next.catch(() => {});
+  });
+
   test("verifyToken is constant-time and rejects bad tokens", () => {
     const { channel } = _makeChannel("card_msg_4");
     const flow = new PermissionFlow({

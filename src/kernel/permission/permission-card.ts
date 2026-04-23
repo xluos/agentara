@@ -4,7 +4,11 @@ import type {
   ColumnSetElement,
   Element,
 } from "../../community/feishu/messaging/types";
-import { buildCardIntro, buildMarkdown, buildResultCard } from "../setup/card-ui";
+import {
+  buildCardIntro,
+  buildMarkdown,
+  buildResultCard,
+} from "../setup/card-ui";
 
 /**
  * `action` discriminator echoed back on `card.action.trigger` when the
@@ -17,6 +21,11 @@ export const PERMISSION_ACTION = "permission_decide";
  * the click result; `request_id` correlates with the pending map in
  * {@link PermissionFlow}.
  *
+ * `allow_session` is a session-scoped "always allow this tool" shortcut —
+ * the flow adds the tool name to an in-memory allow list keyed by
+ * `session_id`, so subsequent calls for the same tool don't prompt again.
+ * Scope is the current session only and the list clears on kernel restart.
+ *
  * The index signature is there only to satisfy the `CallbackValue =
  * Record<string, unknown>` contract on {@link CallbackBehavior}; the
  * real shape is the three named fields above it.
@@ -24,7 +33,7 @@ export const PERMISSION_ACTION = "permission_decide";
 export interface PermissionCallbackValue {
   action: typeof PERMISSION_ACTION;
   request_id: string;
-  decision: "allow" | "deny";
+  decision: "allow" | "deny" | "allow_session";
   [key: string]: unknown;
 }
 
@@ -63,7 +72,7 @@ export function buildPermissionCard(options: {
     );
   }
 
-  elements.push(_buildButtonRow(options.request_id));
+  elements.push(...buildButtonRows(options.request_id));
 
   return {
     schema: "2.0",
@@ -92,6 +101,7 @@ export function buildPermissionResultCard(options: {
   tool_name: string;
   outcome:
     | "allowed"
+    | "allowed_session"
     | "denied"
     | "timeout"
     | "wrong_operator"
@@ -107,6 +117,11 @@ export function buildPermissionResultCard(options: {
       summary = decided_by
         ? `✅ <at id=${decided_by}></at> 已批准 \`${tool_name}\`。`
         : `✅ 已批准 \`${tool_name}\`。`;
+      break;
+    case "allowed_session":
+      summary = decided_by
+        ? `🔓 <at id=${decided_by}></at> 已批准 \`${tool_name}\`，并在本次会话内对该工具放行。`
+        : `🔓 已批准 \`${tool_name}\`，并在本次会话内对该工具放行。`;
       break;
     case "denied":
       summary = decided_by
@@ -143,24 +158,21 @@ function _formatInputPreview(input: unknown): string {
   }
 }
 
-function _buildButtonRow(requestId: string): ColumnSetElement {
-  const allowValue: PermissionCallbackValue = {
+function buildButtonRows(requestId: string): Element[] {
+  const mkValue = (
+    decision: PermissionCallbackValue["decision"],
+  ): PermissionCallbackValue => ({
     action: PERMISSION_ACTION,
     request_id: requestId,
-    decision: "allow",
-  };
-  const denyValue: PermissionCallbackValue = {
-    action: PERMISSION_ACTION,
-    request_id: requestId,
-    decision: "deny",
-  };
+    decision,
+  });
   const approveBtn: ButtonElement = {
     tag: "button",
     name: "permission_allow",
     text: { tag: "plain_text", content: "✅ 批准" },
     type: "primary",
     width: "fill",
-    behaviors: [{ type: "callback", value: allowValue }],
+    behaviors: [{ type: "callback", value: mkValue("allow") }],
   };
   const denyBtn: ButtonElement = {
     tag: "button",
@@ -168,9 +180,20 @@ function _buildButtonRow(requestId: string): ColumnSetElement {
     text: { tag: "plain_text", content: "🚫 拒绝" },
     type: "danger",
     width: "fill",
-    behaviors: [{ type: "callback", value: denyValue }],
+    behaviors: [{ type: "callback", value: mkValue("deny") }],
   };
-  return {
+  const allowSessionBtn: ButtonElement = {
+    tag: "button",
+    name: "permission_allow_session",
+    text: {
+      tag: "plain_text",
+      content: "🔓 批准并在本次会话内不再询问该工具",
+    },
+    type: "default",
+    width: "fill",
+    behaviors: [{ type: "callback", value: mkValue("allow_session") }],
+  };
+  const primaryRow: ColumnSetElement = {
     tag: "column_set",
     flex_mode: "stretch",
     horizontal_spacing: "12px",
@@ -179,4 +202,7 @@ function _buildButtonRow(requestId: string): ColumnSetElement {
       { tag: "column", width: "weighted", weight: 1, elements: [denyBtn] },
     ],
   };
+  // The session-wide allow sits on its own row so its longer copy isn't
+  // squashed, and users don't mistake it for the single-shot approve.
+  return [primaryRow, allowSessionBtn];
 }
