@@ -9,4 +9,4 @@
  * via `agents.default.type` in config.yaml.
  */
 import "./claude-gated";
-import "./codex-gated";
+import "./codex-yolo";

@@ -431,4 +431,35 @@ describe("CodexAgentRunner._parseStreamLine", () => {
     expect(args).toContain("--dangerously-bypass-approvals-and-sandbox");
     expect(args).not.toContain("--full-auto");
   });
+
+  test("inserts configured extra global args before exec", () => {
+    const runner = new CodexAgentRunner({
+      extraGlobalArgs: ["--search"],
+    }) as unknown as Record<string, CallableFunction>;
+    const args = runner["_buildExecArgs"]!({
+      isNew: true,
+      resumeId: "unused",
+      prompt: "\"hello\"",
+    }) as string[];
+
+    expect(args).toContain("--dangerously-bypass-approvals-and-sandbox");
+    expect(args.slice(0, 3)).toEqual(["codex", "--search", "exec"]);
+    expect(args.at(-1)).toBe("\"hello\"");
+  });
+
+  test("detects missing Codex resume rollout errors", () => {
+    const runner = new CodexAgentRunner() as unknown as Record<
+      string,
+      CallableFunction
+    >;
+
+    expect(
+      runner["_isMissingResumeErrorText"]!(
+        "Error: thread/resume: thread/resume failed: no rollout found for thread id 249fe9f1",
+      ),
+    ).toBe(true);
+    expect(runner["_isMissingResumeErrorText"]!("some other error")).toBe(
+      false,
+    );
+  });
 });

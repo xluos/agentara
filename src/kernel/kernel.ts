@@ -1,6 +1,7 @@
 import { FeishuMessageChannel } from "@/community/feishu";
 import * as feishuMessagingSchema from "@/community/feishu/messaging/data";
 import type { Card } from "@/community/feishu/messaging/types";
+import { CodexMissingResumeError } from "@/community/openai";
 import { DataConnection } from "@/data";
 // Side-effect import: every module under `src/plugins/*` registers its
 // runner with the registry at load time. This must happen before any
@@ -18,6 +19,18 @@ import {
 
 import { HonoServer } from "../server";
 
+import {
+  buildAgentCancelledContent,
+  buildAgentFailureContent,
+} from "./agent-failure";
+import {
+  buildCodexResumeExpiredCard,
+  buildCodexResumeMissingCard,
+  buildCodexResumeRestartedCard,
+  buildCodexResumeRestartingCard,
+  CODEX_RESUME_RESTART_ACTION,
+  formatCodexResumeMissingText,
+} from "./codex-resume-card";
 import {
   buildNewCommandRejectionReply,
   buildNewCommandUsageReply,
@@ -59,6 +72,10 @@ class Kernel {
   private _switchFlow!: SwitchFlow;
   private _groupFlow!: GroupFlow;
   private _permissionFlow!: PermissionFlow;
+  private _codexResumeRestarts = new Map<
+    string,
+    { sessionId: string; message: UserMessage }
+  >();
 
   constructor() {
     this._initDatabase();
@@ -541,6 +558,10 @@ class Kernel {
       await this._permissionFlow.handleDecide(payload);
       return;
     }
+    if (payload.action_name === CODEX_RESUME_RESTART_ACTION) {
+      await this._handleCodexResumeRestart(payload);
+      return;
+    }
     this._logger.warn(
       { action_name: payload.action_name, message_id: payload.message_id },
       "unhandled card action",
@@ -561,6 +582,7 @@ class Kernel {
       threadId: inboundMessage.thread_id,
       cwd: resolution.cwd,
       envExtras: resolution.envExtras,
+      forceNewRunnerSession: payload.forceNewRunnerSession,
       firstMessage: inboundMessage,
     });
     let contents: AssistantMessage["content"] = [
@@ -581,22 +603,55 @@ class Kernel {
       },
     );
     contents = [];
-    const stream = await session.stream(inboundMessage, { signal });
     let lastMessage: AssistantMessage | undefined;
-    for await (const message of stream) {
-      if (message.role === "assistant") {
-        contents.push(...message.content);
+    try {
+      const stream = await session.stream(inboundMessage, { signal });
+      for await (const message of stream) {
+        if (message.role === "assistant") {
+          contents.push(...message.content);
+          await this._messageGateway.updateMessageContent(
+            { ...outboundMessage, content: contents },
+            {
+              streaming: true,
+            },
+          );
+          lastMessage = message;
+        }
+      }
+      if (!lastMessage) {
+        throw new Error("No assistant message received from the agent.");
+      }
+    } catch (err) {
+      if (err instanceof CodexMissingResumeError) {
+        await this._handleCodexMissingResume(
+          err,
+          inboundMessage,
+          session.id,
+          outboundMessage,
+        );
+        throw err;
+      }
+      const failureContent = signal?.aborted
+        ? buildAgentCancelledContent()
+        : buildAgentFailureContent(err);
+      try {
         await this._messageGateway.updateMessageContent(
-          { ...outboundMessage, content: contents },
+          { ...outboundMessage, content: failureContent },
           {
-            streaming: true,
+            streaming: false,
           },
         );
-        lastMessage = message;
+      } catch (updateErr) {
+        this._logger.error(
+          {
+            err: updateErr,
+            session_id: session.id,
+            outbound_message_id: outboundMessage.id,
+          },
+          "failed to update assistant message after agent failure",
+        );
       }
-    }
-    if (!lastMessage) {
-      throw new Error("No assistant message received from the agent.");
+      throw err;
     }
     await this._messageGateway.updateMessageContent(
       { ...outboundMessage, content: contents },
@@ -605,6 +660,86 @@ class Kernel {
       },
     );
   };
+
+  private async _handleCodexMissingResume(
+    err: CodexMissingResumeError,
+    inboundMessage: UserMessage,
+    sessionId: string,
+    outboundMessage: AssistantMessage,
+  ): Promise<void> {
+    const card = buildCodexResumeMissingCard({ resumeId: err.resumeId });
+    const channel =
+      inboundMessage.channel_id && inboundMessage.chat_id
+        ? this._feishuChannels.get(inboundMessage.channel_id)
+        : undefined;
+    if (channel) {
+      try {
+        await channel.updateRawCard(outboundMessage.id, card);
+        this._codexResumeRestarts.set(outboundMessage.id, {
+          sessionId,
+          message: inboundMessage,
+        });
+        return;
+      } catch (updateErr) {
+        this._logger.error(
+          {
+            err: updateErr,
+            session_id: sessionId,
+            outbound_message_id: outboundMessage.id,
+          },
+          "failed to update Codex resume recovery card",
+        );
+      }
+    }
+
+    await this._messageGateway.updateMessageContent(
+      {
+        ...outboundMessage,
+        content: [
+          {
+            type: "text",
+            text: formatCodexResumeMissingText(err.resumeId),
+          },
+        ],
+      },
+      { streaming: false },
+    );
+  }
+
+  private async _handleCodexResumeRestart(
+    payload: CardActionPayload,
+  ): Promise<void> {
+    const pending = this._codexResumeRestarts.get(payload.message_id);
+    const channel = this._feishuChannels.get(payload.channel_id);
+    if (!pending) {
+      if (channel) {
+        await channel.updateRawCard(
+          payload.message_id,
+          buildCodexResumeExpiredCard(),
+        );
+      }
+      return;
+    }
+    this._codexResumeRestarts.delete(payload.message_id);
+    if (channel) {
+      await channel.updateRawCard(
+        payload.message_id,
+        buildCodexResumeRestartingCard(),
+      );
+    }
+    this._sessionManager.resetRunnerSessionId(pending.sessionId);
+    await this._taskDispatcher.dispatch(pending.sessionId, {
+      type: "inbound_message",
+      message: pending.message,
+      forceNewRunnerSession: true,
+    });
+    if (channel) {
+      await channel.updateRawCard(
+        payload.message_id,
+        buildCodexResumeRestartedCard(),
+      );
+    }
+  }
 
   private _handleScheduledTask = async (
     _taskId: string,

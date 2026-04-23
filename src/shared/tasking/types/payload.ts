@@ -8,6 +8,7 @@ import { UserMessage } from "../../messaging";
 export const InboundMessageTaskPayload = z.object({
   type: z.literal("inbound_message"),
   message: UserMessage,
+  forceNewRunnerSession: z.boolean().optional(),
 });
 export interface InboundMessageTaskPayload extends z.infer<
   typeof InboundMessageTaskPayload

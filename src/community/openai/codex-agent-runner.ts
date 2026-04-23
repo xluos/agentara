@@ -17,6 +17,19 @@ import {
 
 const logger = createLogger("codex-agent-runner");
 
+export interface CodexAgentRunnerOptions {
+  extraGlobalArgs?: string[];
+  extraExecArgs?: string[];
+}
+
+interface CodexSpawnOptions {
+  args: string[];
+  cwd: string;
+  env: Record<string, string | undefined>;
+  signal?: AbortSignal;
+  sessionId: string;
+}
+
 /**
  * Error thrown when the agent runner is aborted.
  */
@@ -24,6 +37,21 @@ export class AgentAbortError extends Error {
   constructor(message = "Agent execution was aborted") {
     super(message);
     this.name = "AgentAbortError";
+  }
+}
+
+export class CodexMissingResumeError extends Error {
+  readonly causeError: unknown;
+
+  constructor(
+    readonly resumeId: string,
+    causeError: unknown,
+  ) {
+    super(
+      `Codex 无法续接本地 thread：${resumeId}。请确认是否重新开始 Codex 会话。`,
+    );
+    this.name = "CodexMissingResumeError";
+    this.causeError = causeError;
   }
 }
 
@@ -36,6 +64,11 @@ export class AgentAbortError extends Error {
  */
 export class CodexAgentRunner implements AgentRunner {
   readonly type = "codex";
+  private readonly _options: CodexAgentRunnerOptions;
+
+  constructor(options: CodexAgentRunnerOptions = {}) {
+    this._options = options;
+  }
 
   async *stream(
     message: UserMessage,
@@ -70,31 +103,53 @@ export class CodexAgentRunner implements AgentRunner {
     const isolationEnv = config.agents.codex.isolate_host_env
       ? { CODEX_HOME: config.paths.codex_home }
       : {};
+    const env = {
+      ...Bun.env,
+      ...config.agents.env,
+      ...isolationEnv,
+      ...(options.envExtras ?? {}),
+    };
 
-    const proc = Bun.spawn(args, {
+    try {
+      yield* this._streamCodexProcess({
+        args,
+        cwd: options.cwd,
+        env,
+        signal,
+        sessionId,
+      });
+    } catch (err) {
+      if (!isNew && this._isMissingResumeError(err)) {
+        throw new CodexMissingResumeError(resumeId, err);
+      }
+      throw err;
+    }
+  }
+
+  private async *_streamCodexProcess(
+    options: CodexSpawnOptions,
+  ): AsyncIterableIterator<SystemMessage | AssistantMessage | ToolMessage> {
+    const proc = Bun.spawn(options.args, {
       cwd: options.cwd,
-      env: {
-        ...Bun.env,
-        ...config.agents.env,
-        ...isolationEnv,
-        ...(options.envExtras ?? {}),
-      },
+      env: options.env,
       stderr: "pipe",
     });
-
     // Handle abort signal
     let aborted = false;
     const abortHandler = () => {
       aborted = true;
-      logger.info({ session_id: sessionId }, "killing Codex CLI process");
+      logger.info(
+        { session_id: options.sessionId },
+        "killing Codex CLI process",
+      );
       proc.kill();
     };
-    if (signal) {
-      if (signal.aborted) {
+    if (options.signal) {
+      if (options.signal.aborted) {
         proc.kill();
         throw new AgentAbortError();
       }
-      signal.addEventListener("abort", abortHandler, { once: true });
+      options.signal.addEventListener("abort", abortHandler, { once: true });
     }
 
     const decoder = new TextDecoder();
@@ -121,7 +176,10 @@ export class CodexAgentRunner implements AgentRunner {
         buffer = lines.pop()!;
         for (const line of lines) {
           if (line.trim()) {
-            const messages = this._parseStreamLine(line.trim(), sessionId);
+            const messages = this._parseStreamLine(
+              line.trim(),
+              options.sessionId,
+            );
             for (const msg of messages) {
               yield msg;
             }
@@ -130,14 +188,14 @@ export class CodexAgentRunner implements AgentRunner {
       }
 
       if (!aborted && buffer.trim()) {
-        const messages = this._parseStreamLine(buffer.trim(), sessionId);
+        const messages = this._parseStreamLine(buffer.trim(), options.sessionId);
         for (const msg of messages) {
           yield msg;
         }
       }
     } finally {
-      if (signal) {
-        signal.removeEventListener("abort", abortHandler);
+      if (options.signal) {
+        options.signal.removeEventListener("abort", abortHandler);
       }
     }
 
@@ -152,15 +210,7 @@ export class CodexAgentRunner implements AgentRunner {
         stderrChunks.length > 0
           ? decoder.decode(Bun.concatArrayBuffers(stderrChunks))
           : "";
-      const parts: string[] = [];
-      if (stdoutRaw.trim()) {
-        parts.push(`Stdout:\n${stdoutRaw.trim()}`);
-      }
-      if (stderrText.trim()) {
-        parts.push(`Stderr:\n${stderrText.trim()}`);
-      }
-      const detail = parts.length > 0 ? `\n\n${parts.join("\n\n")}` : "";
-      throw new Error(`Codex CLI exited with code ${exitCode}${detail}`);
+      throw new CodexCliExitError(exitCode, stdoutRaw, stderrText);
     }
   }
 
@@ -493,6 +543,7 @@ export class CodexAgentRunner implements AgentRunner {
     const configuredModel = config.agents.default.model;
     const shared = [
       "codex",
+      ...(this._options.extraGlobalArgs ?? []),
       "exec",
       // Only pin the model when config names one; otherwise Codex CLI
       // picks its own default (user omitted `model` in config.yaml).
@@ -500,11 +551,24 @@ export class CodexAgentRunner implements AgentRunner {
       "--json",
       "--dangerously-bypass-approvals-and-sandbox",
       "--skip-git-repo-check",
+      ...(this._options.extraExecArgs ?? []),
     ];
     if (isNew) {
       return [...shared, prompt];
     }
     return [...shared, "resume", resumeId, prompt];
+  }
+
+  private _isMissingResumeError(err: unknown): boolean {
+    if (!(err instanceof CodexCliExitError)) return false;
+    return this._isMissingResumeErrorText(err.stderr);
+  }
+
+  private _isMissingResumeErrorText(text: string): boolean {
+    return (
+      text.includes("thread/resume failed") &&
+      text.includes("no rollout found for thread id")
+    );
   }
 
   /**
@@ -541,5 +605,24 @@ export class CodexAgentRunner implements AgentRunner {
     } catch (err) {
       logger.warn({ err }, "Failed to sync CLAUDE.md → AGENTS.md");
     }
+  }
+}
+
+class CodexCliExitError extends Error {
+  constructor(
+    readonly exitCode: number,
+    readonly stdout: string,
+    readonly stderr: string,
+  ) {
+    const parts: string[] = [];
+    if (stdout.trim()) {
+      parts.push(`Stdout:\n${stdout.trim()}`);
+    }
+    if (stderr.trim()) {
+      parts.push(`Stderr:\n${stderr.trim()}`);
+    }
+    const detail = parts.length > 0 ? `\n\n${parts.join("\n\n")}` : "";
+    super(`Codex CLI exited with code ${exitCode}${detail}`);
+    this.name = "CodexCliExitError";
   }
 }

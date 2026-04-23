@@ -1,12 +1,12 @@
 import { existsSync, unlinkSync } from "node:fs";
 
-import { and, desc, eq, isNull } from "drizzle-orm";
+import { and, desc, eq } from "drizzle-orm";
 
 import type { DrizzleDB } from "@/data";
 import { config, createLogger, extractTextContent, uuid } from "@/shared";
 import type { Session as SessionEntity, UserMessage } from "@/shared";
 
-import { getRuntimeDefaultAgentType } from "../agents";
+import { getRuntimeDefaultAgentType, resolveAgentTypeAlias } from "../agents";
 
 import { sessions } from "./data";
 import { Session } from "./session";
@@ -53,6 +53,12 @@ export interface SessionResolveOptions {
    * Not persisted; re-resolved on every dispatch from group binding.
    */
   envExtras?: Record<string, string>;
+
+  /**
+   * Resume the Agentara session row but start a fresh underlying runner
+   * session/thread. Used when a provider-specific resume id is stale.
+   */
+  forceNewRunnerSession?: boolean;
 
   /**
    * The first message of the session.
@@ -125,7 +131,8 @@ export class SessionManager {
       throw new SessionAlreadyExistsError(sessionId);
     }
 
-    const agentType = options?.agentType ?? getRuntimeDefaultAgentType();
+    const requestedAgentType = options?.agentType ?? getRuntimeDefaultAgentType();
+    const agentType = resolveAgentTypeAlias(requestedAgentType);
     const cwd = options?.cwd ?? config.paths.home;
     const channelId = options?.channelId ?? null;
     const chatId = options?.chatId ?? null;
@@ -156,6 +163,16 @@ export class SessionManager {
       );
     }
 
+    if (agentType !== requestedAgentType) {
+      this._logger.info(
+        {
+          session_id: sessionId,
+          requested_agent_type: requestedAgentType,
+          resolved_agent_type: agentType,
+        },
+        "legacy agent type resolved for new session",
+      );
+    }
     this._logger.info(`Creating session: ${sessionId}`);
     const session = new Session(sessionId, agentType, {
       isNewSession: true,
@@ -189,15 +206,29 @@ export class SessionManager {
       throw new SessionNotFoundError(sessionId);
     }
 
+    const requestedAgentType = options?.agentType ?? row.agent_type;
+    const agentType = resolveAgentTypeAlias(requestedAgentType);
+    if (agentType !== requestedAgentType) {
+      this._logger.info(
+        {
+          session_id: sessionId,
+          requested_agent_type: requestedAgentType,
+          resolved_agent_type: agentType,
+        },
+        "legacy agent type resolved for resumed session",
+      );
+    }
     this._logger.info(`Resuming session: ${sessionId}`);
     const session = new Session(
       sessionId,
-      options?.agentType ?? row.agent_type,
+      agentType,
       {
-        isNewSession: false,
+        isNewSession: options?.forceNewRunnerSession ?? false,
         cwd: options?.cwd ?? row.cwd,
         envExtras: options?.envExtras,
-        runnerSessionId: row.runner_session_id ?? undefined,
+        runnerSessionId: options?.forceNewRunnerSession
+          ? undefined
+          : row.runner_session_id ?? undefined,
       },
     );
     this._attachWriter(session, sessionId);
@@ -233,6 +264,17 @@ export class SessionManager {
       unlinkSync(filePath);
     }
     this._logger.info(`Removed session: ${sessionId}`);
+  }
+
+  resetRunnerSessionId(sessionId: string): void {
+    this._db
+      .update(sessions)
+      .set({
+        runner_session_id: null,
+        updated_at: Date.now(),
+      })
+      .where(eq(sessions.id, sessionId))
+      .run();
   }
 
   /**
@@ -275,9 +317,7 @@ export class SessionManager {
         runner_session_id: runnerSessionId,
         updated_at: Date.now(),
       })
-      .where(
-        and(eq(sessions.id, sessionId), isNull(sessions.runner_session_id)),
-      )
+      .where(eq(sessions.id, sessionId))
       .run();
   }
 
