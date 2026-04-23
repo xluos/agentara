@@ -6,6 +6,8 @@ import type { DrizzleDB } from "@/data";
 import { config, createLogger, extractTextContent, uuid } from "@/shared";
 import type { Session as SessionEntity, UserMessage } from "@/shared";
 
+import { getRuntimeDefaultAgentType } from "../agents";
+
 import { sessions } from "./data";
 import { Session } from "./session";
 import {
@@ -21,7 +23,7 @@ import {
 export interface SessionResolveOptions {
   /**
    * The type of agent runner (e.g. "claude-code").
-   * Defaults to `config.agents.default.type`.
+   * Defaults to the runtime default agent type.
    */
   agentType?: string;
 
@@ -95,7 +97,7 @@ export class SessionManager {
   /**
    * Resolves session by database existence: creates if missing, resumes if exists.
    * @param sessionId - The session identifier.
-   * @param options - Optional agent_type and cwd (default from config).
+   * @param options - Optional agent_type and cwd (default from runtime/config).
    * @returns A Session instance.
    */
   async resolveSession(
@@ -111,7 +113,7 @@ export class SessionManager {
   /**
    * Creates a new session and inserts a row into the database.
    * @param sessionId - The session identifier.
-   * @param options - Optional agent_type and cwd (default from config).
+   * @param options - Optional agent_type and cwd (default from runtime/config).
    * @returns A Session instance with isNewSession: true.
    * @throws SessionAlreadyExistsError if the session already exists.
    */
@@ -123,7 +125,7 @@ export class SessionManager {
       throw new SessionAlreadyExistsError(sessionId);
     }
 
-    const agentType = options?.agentType ?? config.agents.default.type;
+    const agentType = options?.agentType ?? getRuntimeDefaultAgentType();
     const cwd = options?.cwd ?? config.paths.home;
     const channelId = options?.channelId ?? null;
     const chatId = options?.chatId ?? null;

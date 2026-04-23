@@ -1,6 +1,12 @@
 import { existsSync, readdirSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
 
+import {
+  getAgentRuntimeState,
+  resetRuntimeDefaultAgentType,
+  setRuntimeDefaultAgentType,
+  UnknownAgentTypeError,
+} from "@/kernel/agents";
 import { formatRepoRef } from "@/kernel/repo-ref";
 import {
   ensureCachedMirror,
@@ -77,6 +83,10 @@ function cardReply(
     summary?: string;
   },
 ): CardCommandResult {
+  const fallbackLines = [title, ...lines];
+  for (const section of options?.sections ?? []) {
+    fallbackLines.push(section.title, ...section.lines);
+  }
   return {
     kind: "card",
     card: buildCommandCard({
@@ -85,9 +95,108 @@ function cardReply(
       sections: options?.sections,
       summary: options?.summary,
     }),
-    fallback_text: [title, ...lines].join("\n"),
+    fallback_text: fallbackLines.join("\n"),
   };
 }
+
+const AGENT_USAGE =
+  "用法：`/agent`、`/agent list`、`/agent use <type>`、`/agent reset`";
+
+function agentStatusReply(): CardCommandResult {
+  const state = getAgentRuntimeState();
+  const source = state.hasRuntimeOverride ? "运行时" : "配置";
+  const lines = [
+    `- 当前默认 Agent：\`${state.activeType}\`（${source}）`,
+    state.configuredDefaultType
+      ? `- 配置默认：\`${state.configuredDefaultType}\``
+      : "- 配置默认：(config.yaml 未加载)",
+    "- 影响范围：之后创建的新 session；已有 session 会继续使用创建时记录的 Agent。",
+  ];
+  const agentLines =
+    state.availableTypes.length > 0
+      ? state.availableTypes.map((type) => {
+          const marks: string[] = [];
+          if (type === state.activeType) marks.push("当前");
+          if (type === state.configuredDefaultType) marks.push("配置默认");
+          return `- \`${type}\`${marks.length ? ` ← ${marks.join(" / ")}` : ""}`;
+        })
+      : ["- (当前没有注册任何 Agent runner)"];
+  return cardReply("Agent 管理", lines, {
+    sections: [{ title: "可选 Agent", lines: agentLines }],
+  });
+}
+
+const agentHandler: CommandHandler = {
+  name: "agent",
+  description: "/agent [list|use <type>|reset] — 查看或切换运行时默认 Agent",
+  async execute(ctx) {
+    const [verbRaw, typeRaw] = ctx.args;
+    const verb = verbRaw?.toLowerCase();
+    if (!verb || verb === "list" || verb === "status") {
+      return agentStatusReply();
+    }
+
+    if (verb === "reset" || verb === "default") {
+      const result = resetRuntimeDefaultAgentType();
+      return cardReply("Agent 管理", [
+        result.changed
+          ? `✅ 已恢复配置默认 Agent：\`${result.currentType}\``
+          : `ℹ️  当前已经是配置默认 Agent：\`${result.currentType}\``,
+      ]);
+    }
+
+    const requestedType =
+      verb === "use" || verb === "switch" || verb === "set"
+        ? typeRaw
+        : verbRaw;
+    if (!requestedType) {
+      return cardReply("Agent 管理", [
+        AGENT_USAGE,
+        "- 可先执行 `/agent list` 查看可选项。",
+      ]);
+    }
+
+    try {
+      const result = setRuntimeDefaultAgentType(requestedType);
+      ctx.logger.info(
+        {
+          previous_agent_type: result.previousType,
+          current_agent_type: result.currentType,
+        },
+        "runtime default agent switched",
+      );
+      return cardReply("Agent 管理", [
+        result.changed
+          ? `✅ 已切换运行时默认 Agent：\`${result.previousType}\` → \`${result.currentType}\``
+          : `ℹ️  当前默认 Agent 已经是 \`${result.currentType}\``,
+        "- 之后创建的新 session 会使用这个 Agent；已有 session 不会被强制切换。",
+      ]);
+    } catch (err) {
+      if (err instanceof UnknownAgentTypeError) {
+        return cardReply("Agent 管理", [
+          `❌ 未知 Agent：\`${err.type}\``,
+          AGENT_USAGE,
+        ], {
+          sections: [
+            {
+              title: "可选 Agent",
+              lines: err.availableTypes.map((type) => `- \`${type}\``),
+            },
+          ],
+        });
+      }
+      throw err;
+    }
+  },
+};
+
+const agentsHandler: CommandHandler = {
+  name: "agents",
+  description: "/agents — 查看可选 Agent 列表",
+  async execute() {
+    return agentStatusReply();
+  },
+};
 
 const bindHandler: CommandHandler = {
   name: "bind",
@@ -549,6 +658,8 @@ export const helpHandler: CommandHandler = {
 };
 
 export const BUILTIN_COMMANDS: CommandHandler[] = [
+  agentHandler,
+  agentsHandler,
   bindHandler,
   unbindHandler,
   statusHandler,
