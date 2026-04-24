@@ -2,6 +2,18 @@ import { config } from "@/shared";
 
 import { listRunnerTypes } from "./registry";
 
+/**
+ * Runner types that stay registered for tests (DummyAgentRunner /
+ * MockAgentRunner) but must never appear in user-facing listings like
+ * `/setting` or `/agent list`. Filter with `filterUserFacingAgentTypes`.
+ * Selecting one by explicit name still works — this is display-only.
+ */
+const HIDDEN_AGENT_TYPES = new Set(["dummy", "mock"]);
+
+export function filterUserFacingAgentTypes(types: string[]): string[] {
+  return types.filter((t) => !HIDDEN_AGENT_TYPES.has(t));
+}
+
 let runtimeDefaultAgentType: string | null = null;
 
 export interface AgentRuntimeState {

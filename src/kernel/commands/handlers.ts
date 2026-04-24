@@ -2,6 +2,7 @@ import { existsSync, readdirSync, statSync } from "node:fs";
 import { basename, join } from "node:path";
 
 import {
+  filterUserFacingAgentTypes,
   getAgentRuntimeState,
   resetRuntimeDefaultAgentType,
   setRuntimeDefaultAgentType,
@@ -115,9 +116,10 @@ function agentStatusReply(): CardCommandResult {
       : "- 配置默认：(config.yaml 未加载)",
     "- 影响范围：之后创建的新 session；已有 session 会继续使用创建时记录的 Agent。",
   ];
+  const visibleTypes = filterUserFacingAgentTypes(state.availableTypes);
   const agentLines =
-    state.availableTypes.length > 0
-      ? state.availableTypes.map((type) => {
+    visibleTypes.length > 0
+      ? visibleTypes.map((type) => {
           const marks: string[] = [];
           if (type === state.activeType) marks.push("当前");
           if (type === state.configuredDefaultType) marks.push("配置默认");

@@ -5,6 +5,7 @@ import { eq, like, or } from "drizzle-orm";
 
 import type { DrizzleDB } from "@/data";
 import {
+  filterUserFacingAgentTypes,
   getAgentRuntimeState,
   listRunnerTypes,
   setRuntimeDefaultAgentType,
@@ -367,10 +368,11 @@ export class SettingFlow {
 
   private _renderMainCard(currentChatId: string | null): Card {
     const agentState = getAgentRuntimeState();
-    const availableTypes =
+    const availableTypes = filterUserFacingAgentTypes(
       agentState.availableTypes.length > 0
         ? agentState.availableTypes
-        : listRunnerTypes();
+        : listRunnerTypes(),
+    );
     const workspaces = this._workspaceStore.listWorkspaces();
     const bindings = this._workspaceStore.listBindings();
     const bindingCounts = new Map<string, number>();
