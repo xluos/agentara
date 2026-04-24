@@ -3,9 +3,9 @@ import { createLogger } from "@/shared";
 const _logger = createLogger("country-check");
 
 /**
- * Endpoints that return the caller's country as a 2-letter ISO code. All
- * probes fire in parallel and the first successful answer wins — any single
- * endpoint being slow, rate-limited, or offline no longer stalls the gate.
+ * Endpoints that return the caller's country as a 2-letter ISO code. Both
+ * probes fire in parallel and the first successful answer wins — either
+ * endpoint being slow or offline no longer stalls the gate.
  *
  * `ipapi.co` was dropped: it rate-limits aggressively from shared egress
  * IPs, which was the main source of the 2s timeout we'd then serialize on.
@@ -19,7 +19,7 @@ const COUNTRY_PROBES = [
   { url: "https://api.country.is/", kind: "country_is_json" as const },
 ];
 
-const DEFAULT_TIMEOUT_MS = 2000;
+const DEFAULT_TIMEOUT_MS = 5000;
 
 /**
  * Race every IP-geolocation probe in parallel and return the first ISO
@@ -30,7 +30,7 @@ const DEFAULT_TIMEOUT_MS = 2000;
 export async function detectCountry(options?: {
   /** Proxy URL (e.g. `http://127.0.0.1:7897`). Skipped when undefined. */
   proxy?: string;
-  /** Per-request timeout. Defaults to 2s, matching the zshrc curl. */
+  /** Per-request timeout. Defaults to 5s, matching the zshrc curl max-time. */
   timeoutMs?: number;
 }): Promise<string | null> {
   const timeoutMs = options?.timeoutMs ?? DEFAULT_TIMEOUT_MS;

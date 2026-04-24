@@ -14,6 +14,7 @@ import {
 import { detectCountry } from "./_country-check";
 
 const _logger = createLogger("claude-gated");
+const COUNTRY_CHECK_TIMEOUT_MS = 5000;
 
 /**
  * Wraps {@link ClaudeAgentRunner} with the safety preamble the user runs
@@ -22,8 +23,8 @@ const _logger = createLogger("claude-gated");
  *   1. Resolve a proxy URL (from `agents.env.HTTPS_PROXY` / `HTTP_PROXY`)
  *      and use it both for the country-detection fetch and for the
  *      delegated spawn's env.
- *   2. Call the IP-geolocation probes in {@link detectCountry} with a
- *      short timeout. Abort the dispatch if the country is not `US` or if
+ *   2. Call the IP-geolocation probes in {@link detectCountry} with a 5s
+ *      timeout. Abort the dispatch if the country is not `US` or if
  *      every probe failed — we'd rather raise a clear error than let the
  *      agent burn tokens against a blocked egress.
  *   3. Delegate to the built-in Claude runner, carrying the proxy through
@@ -44,7 +45,10 @@ class ClaudeGatedRunner implements AgentRunner {
   ): AsyncIterableIterator<SystemMessage | AssistantMessage | ToolMessage> {
     const proxy = _resolveProxy();
 
-    const country = await detectCountry({ proxy });
+    const country = await detectCountry({
+      proxy,
+      timeoutMs: COUNTRY_CHECK_TIMEOUT_MS,
+    });
     if (country === null) {
       throw new Error(
         "无法判定当前出口 IP 所在国家/地区，已拦截 Claude 启动（claude-gated）。",
