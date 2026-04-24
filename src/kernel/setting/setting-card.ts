@@ -326,19 +326,46 @@ function _buildConfigForm(options: SettingMainCardOptions): FormElement {
     width: "fill",
   };
 
+  // Agent type is the primary choice (wider); Agent Model is rarely tweaked
+  // once set, so it gets a narrower column.
+  const agentRow: ColumnSetElement = {
+    tag: "column_set",
+    flex_mode: "stretch",
+    horizontal_spacing: "12px",
+    columns: [
+      {
+        tag: "column",
+        width: "weighted",
+        weight: 2,
+        vertical_spacing: "4px",
+        elements: [
+          buildMarkdown("<font color='grey'>默认 Agent</font>", {
+            text_size: "notation",
+          }),
+          agentSelect,
+        ],
+      },
+      {
+        tag: "column",
+        width: "weighted",
+        weight: 1,
+        vertical_spacing: "4px",
+        elements: [
+          buildMarkdown("<font color='grey'>Agent Model</font>", {
+            text_size: "notation",
+          }),
+          modelInput,
+        ],
+      },
+    ],
+  };
+
   return {
     tag: "form",
     name: "setting_config_form",
     elements: [
       buildMarkdown("**全局配置**"),
-      buildMarkdown("<font color='grey'>默认 Agent</font>", {
-        text_size: "notation",
-      }),
-      agentSelect,
-      buildMarkdown("<font color='grey'>Agent Model</font>", {
-        text_size: "notation",
-      }),
-      modelInput,
+      agentRow,
       buildMarkdown("<font color='grey'>Codex 行为</font>", {
         text_size: "notation",
       }),
