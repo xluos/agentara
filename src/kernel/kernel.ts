@@ -50,6 +50,7 @@ import { ReposFlow } from "./repos";
 import { SessionManager } from "./sessioning";
 import * as sessioningSchema from "./sessioning/data";
 import { SettingFlow } from "./setting/setting-flow";
+import { SETUP_DISMISS_ACTION } from "./setup/setup-card";
 import { SetupFlow } from "./setup/setup-flow";
 import { SwitchFlow } from "./setup/switch-flow";
 import { TaskDispatcher } from "./tasking";
@@ -583,6 +584,10 @@ class Kernel {
   private _handleCardAction = async (payload: CardActionPayload) => {
     if (payload.action_name === "setup_submit") {
       await this._setupFlow.handleSubmit(payload);
+      return;
+    }
+    if (payload.action_name === SETUP_DISMISS_ACTION) {
+      await this._setupFlow.handleDismiss(payload);
       return;
     }
     if (payload.action_name === "switch_submit") {

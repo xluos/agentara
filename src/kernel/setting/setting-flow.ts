@@ -27,6 +27,7 @@ import type { Card } from "../../community/feishu/messaging/types";
 
 import { writeConfigPatch, type SettingConfigPatch } from "./config-writer";
 import {
+  buildSettingDismissedCard,
   buildSettingMainCard,
   buildSettingResultCard,
   buildWorkspaceDeleteConfirmCard,
@@ -155,6 +156,14 @@ export class SettingFlow {
           return;
         case SETTING_ACTION.wsDeleteApply:
           await this._handleWsDeleteApply(channel, payload);
+          return;
+        case SETTING_ACTION.dismiss:
+          await this._tryUpdateCard(
+            channel,
+            payload.message_id,
+            buildSettingDismissedCard(),
+            "dismiss",
+          );
           return;
         default:
           this._logger.warn(

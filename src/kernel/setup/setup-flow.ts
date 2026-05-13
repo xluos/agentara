@@ -14,10 +14,12 @@ import {
 } from "@/shared";
 
 import type { FeishuMessageChannel } from "../../community/feishu/messaging/message-channel";
+import type { Card } from "../../community/feishu/messaging/types";
 import { ensureCachedMirror, type GroupWorkspaceStore } from "../workspaces";
 
 import {
   buildSetupCard,
+  buildSetupDismissedCard,
   buildSetupResultCard,
   SETUP_FIELD,
   type RepoPrefill,
@@ -207,25 +209,17 @@ export class SetupFlow {
       pending.catalog_snapshot,
       pending.locked_repos,
     );
-    if (selections.length === 0) {
-      await this._tryUpdateCard(
-        channel,
-        payload.message_id,
-        buildSetupResultCard("⚠️  未选择任何仓库，请重新发送 `/setup`。", []),
-        "empty-selection",
-      );
-      return;
-    }
 
     const rawPrimary =
       typeof payload.form_value[SETUP_FIELD.primaryRepo] === "string"
         ? (payload.form_value[SETUP_FIELD.primaryRepo] as string)
         : "";
-    // `selections` is guaranteed non-empty by the earlier length-check return.
-    const firstSel = selections[0]!;
-    const primary = selections.find((s) => s.name === rawPrimary)
-      ? rawPrimary
-      : firstSel.name;
+    // Zero-repo submit is allowed: the user just wants to create or rename
+    // the workspace. We skip the clone loop and only touch the binding row.
+    const firstSel = selections[0];
+    const primary = firstSel
+      ? (selections.find((s) => s.name === rawPrimary)?.name ?? firstSel.name)
+      : null;
 
     // Swap the card to a "working" state immediately so the user sees that
     // the submit landed, then run clones (possibly long) before the final
@@ -233,12 +227,14 @@ export class SetupFlow {
     await this._tryUpdateCard(
       channel,
       payload.message_id,
-      buildSetupResultCard(
-        `⏳ 正在初始化 \`${selections.map((s) => s.name).join("、")}\`…`,
-        selections.map(
-          (s) => `- \`${formatRepoRef(s.name, s.branch)}\``,
-        ),
-      ),
+      selections.length > 0
+        ? buildSetupResultCard(
+            `⏳ 正在初始化 \`${selections.map((s) => s.name).join("、")}\`…`,
+            selections.map(
+              (s) => `- \`${formatRepoRef(s.name, s.branch)}\``,
+            ),
+          )
+        : buildSetupResultCard("⏳ 正在更新 workspace…", []),
       "pending-state",
     );
 
@@ -266,27 +262,41 @@ export class SetupFlow {
       results.push(await this._cloneAndCheckout(workspacePath, sel));
     }
 
-    const primaryResult = results.find((r) => r.name === primary);
-    // active_branch comes from `actual_branch`, which is always set unless the
-    // clone itself failed. If the requested branch didn't exist, we bind to
-    // whatever the clone landed on (usually the remote HEAD) instead of null.
-    const activeRepo =
-      primaryResult && primaryResult.status !== "clone_failed" ? primary : null;
-    const activeBranch = primaryResult?.actual_branch ?? null;
-
-    const binding = this._workspaceStore.upsertBinding(pending.chat_id, {
-      active_repo: activeRepo,
-      active_branch: activeBranch,
-    });
+    // Skip the active-repo update when the user didn't select anything — we
+    // don't want to clobber an existing active_repo just because they popped
+    // /setup open to rename the workspace.
+    let binding = provisionalBinding;
+    let activeRepo: string | null = provisionalBinding.active_repo ?? null;
+    let activeBranch: string | null = provisionalBinding.active_branch ?? null;
+    if (primary) {
+      const primaryResult = results.find((r) => r.name === primary);
+      // active_branch comes from `actual_branch`, which is always set unless
+      // the clone itself failed. If the requested branch didn't exist, we
+      // bind to whatever the clone landed on (usually the remote HEAD)
+      // instead of null.
+      activeRepo =
+        primaryResult && primaryResult.status !== "clone_failed"
+          ? primary
+          : null;
+      activeBranch = primaryResult?.actual_branch ?? null;
+      binding = this._workspaceStore.upsertBinding(pending.chat_id, {
+        active_repo: activeRepo,
+        active_branch: activeBranch,
+      });
+    }
 
     const lines = [
       `- Workspace ID: \`${binding.workspace_id}\``,
       `- Workspace 名称: \`${binding.workspace_name}\``,
       ...results.map(_formatResultLine),
     ];
-    const summary = activeRepo && activeBranch
-      ? `✅ 初始化完成，主仓库 \`${formatRepoRef(activeRepo, activeBranch)}\`。`
-      : "⚠️  workspace 已创建，但这次没有成功设置主仓库。";
+    const summary = selections.length === 0
+      ? pending.locked_workspace_id
+        ? `✅ Workspace 名称已更新为 \`${binding.workspace_name}\`（未克隆新仓库）。`
+        : `✅ Workspace \`${binding.workspace_name}\` 已创建（暂未克隆仓库；可后续 \`/clone\` 或重发 \`/setup\`）。`
+      : activeRepo && activeBranch
+        ? `✅ 初始化完成，主仓库 \`${formatRepoRef(activeRepo, activeBranch)}\`。`
+        : "⚠️  workspace 已创建，但这次没有成功设置主仓库。";
     await this._tryUpdateCard(
       channel,
       payload.message_id,
@@ -304,6 +314,46 @@ export class SetupFlow {
   }
 
   /**
+   * Entry point for the "关闭" callback button on an open setup card. Clears
+   * any pending state for that message and swaps the card for a no-button
+   * dismissed state so the form elements are no longer interactable.
+   */
+  async handleDismiss(payload: CardActionPayload): Promise<void> {
+    const channel = this._feishuChannels.get(payload.channel_id);
+    if (!channel) {
+      this._logger.warn(
+        { channel_id: payload.channel_id },
+        "received setup dismiss for unknown channel",
+      );
+      return;
+    }
+    const pending = this._pending.get(payload.message_id);
+    if (pending && pending.initiator_open_id &&
+      payload.operator_open_id !== pending.initiator_open_id) {
+      // Don't let a non-initiator close someone else's card; surface the
+      // same wrong-user copy as submit.
+      await this._tryUpdateCard(
+        channel,
+        payload.message_id,
+        buildSetupResultCard("🚫 这不是你的表单。", []),
+        "dismiss-non-initiator",
+      );
+      return;
+    }
+    this._pending.delete(payload.message_id);
+    await this._tryUpdateCard(
+      channel,
+      payload.message_id,
+      buildSetupDismissedCard(),
+      "dismiss",
+    );
+    this._logger.info(
+      { chat_id: pending?.chat_id, message_id: payload.message_id },
+      "setup card dismissed",
+    );
+  }
+
+  /**
    * `updateRawCard` wrapper that logs the Feishu error body instead of
    * crashing the handleSubmit flow. On failure we press on — the user at
    * least knows clone ran from logs, even if the UI card is stuck.
@@ -311,7 +361,7 @@ export class SetupFlow {
   private async _tryUpdateCard(
     channel: FeishuMessageChannel,
     messageId: string,
-    card: ReturnType<typeof buildSetupResultCard>,
+    card: Card,
     stage: string,
   ): Promise<void> {
     try {

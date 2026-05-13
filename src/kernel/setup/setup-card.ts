@@ -13,10 +13,18 @@ import type {
 
 import {
   buildCardIntro,
+  buildDismissedCard,
   buildMarkdown,
   buildResultCard,
   buildSectionBlock,
 } from "./card-ui";
+
+/**
+ * Action discriminator for the "关闭" callback button on the setup card.
+ * Lives next to `setup_submit` (form_submit) so the kernel can route both
+ * back to `SetupFlow`.
+ */
+export const SETUP_DISMISS_ACTION = "setup_dismiss";
 
 /**
  * Field naming convention used by both the card renderer and the submit
@@ -102,6 +110,8 @@ export function buildSetupCard(
     elements: formElements,
   };
 
+  const dismissBtn = _buildDismissButton();
+
   const bodyElements: Element[] = [
     buildCardIntro({
       title: hasExisting ? "更新 Workspace" : "初始化 Workspace",
@@ -123,6 +133,7 @@ export function buildSetupCard(
   }
 
   bodyElements.push(form);
+  bodyElements.push(dismissBtn);
 
   return {
     schema: "2.0",
@@ -139,6 +150,22 @@ export function buildSetupCard(
       vertical_spacing: "12px",
       elements: bodyElements,
     },
+  };
+}
+
+function _buildDismissButton(): ButtonElement {
+  return {
+    tag: "button",
+    name: "setup_dismiss_btn",
+    text: { tag: "plain_text", content: "关闭" },
+    type: "default",
+    width: "fill",
+    behaviors: [
+      {
+        type: "callback",
+        value: { action: SETUP_DISMISS_ACTION },
+      },
+    ],
   };
 }
 
@@ -278,4 +305,13 @@ export function buildSetupResultCard(
     summary,
     detail: perRepoLines,
   });
+}
+
+/**
+ * Dismiss card shown when the user clicks "关闭" on a setup card without
+ * submitting. Replaces the original card in place so the form elements
+ * are no longer interactable.
+ */
+export function buildSetupDismissedCard(): Card {
+  return buildDismissedCard({ title: "Workspace 初始化" });
 }

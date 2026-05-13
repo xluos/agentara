@@ -106,6 +106,39 @@ export function buildSectionBlock(options: {
   ];
 }
 
+/**
+ * Card emitted when a user explicitly dismisses an interactive flow without
+ * completing it. Title + subtitle only — no body line and no buttons. We
+ * deliberately avoid `buildResultCard` here because it renders the summary
+ * twice (once in the subtitle slot, once in the body), which read as
+ * duplicated copy on small dismiss messages like "已关闭".
+ */
+export function buildDismissedCard(options: {
+  title: string;
+  summary?: string;
+}): Card {
+  const summary = options.summary ?? "已关闭，可重新发送原命令打开新卡片。";
+  return {
+    schema: "2.0",
+    config: {
+      streaming_mode: false,
+      update_multi: true,
+      width_mode: "fill",
+      summary: { content: summarizeForSubtitle(summary) },
+    },
+    body: {
+      padding: "12px 16px 16px 16px",
+      vertical_spacing: "12px",
+      elements: [
+        buildCardIntro({
+          title: options.title,
+          subtitle: summary,
+        }),
+      ],
+    },
+  };
+}
+
 export function buildResultCard(options: {
   title: string;
   summary: string;

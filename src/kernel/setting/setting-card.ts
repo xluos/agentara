@@ -15,6 +15,7 @@ import type {
 } from "../../community/feishu/messaging/types";
 import {
   buildCardIntro,
+  buildDismissedCard,
   buildMarkdown,
   buildResultCard,
   buildSectionBlock,
@@ -33,6 +34,7 @@ export const SETTING_ACTION = {
   wsDetail: "setting_ws_detail",
   wsDeletePrompt: "setting_ws_delete_prompt",
   wsDeleteApply: "setting_ws_delete_apply",
+  dismiss: "setting_dismiss",
 } as const;
 
 /**
@@ -101,6 +103,8 @@ export function buildSettingMainCard(options: SettingMainCardOptions): Card {
       elements.push(_buildWorkspaceRow(entry));
     }
   }
+
+  elements.push(_buildDismissButton());
 
   return {
     schema: "2.0",
@@ -266,7 +270,20 @@ export function buildSettingResultCard(
         },
       ],
     };
-    card.body.elements.push(backBtn);
+    card.body.elements.push({
+      tag: "column_set",
+      flex_mode: "stretch",
+      horizontal_spacing: "12px",
+      columns: [
+        { tag: "column", width: "weighted", weight: 1, elements: [backBtn] },
+        {
+          tag: "column",
+          width: "weighted",
+          weight: 1,
+          elements: [_buildDismissButton()],
+        },
+      ],
+    });
   }
   return card;
 }
@@ -507,18 +524,15 @@ function _buildDetailActionRow(
       },
     ],
   };
+  const dismissBtn = _buildDismissButton();
   if (isProtected) {
     return {
       tag: "column_set",
       flex_mode: "stretch",
       horizontal_spacing: "12px",
       columns: [
-        {
-          tag: "column",
-          width: "weighted",
-          weight: 1,
-          elements: [backBtn],
-        },
+        { tag: "column", width: "weighted", weight: 1, elements: [backBtn] },
+        { tag: "column", width: "weighted", weight: 1, elements: [dismissBtn] },
       ],
     };
   }
@@ -544,16 +558,42 @@ function _buildDetailActionRow(
     horizontal_spacing: "12px",
     columns: [
       { tag: "column", width: "weighted", weight: 1, elements: [backBtn] },
+      { tag: "column", width: "weighted", weight: 1, elements: [dismissBtn] },
       { tag: "column", width: "weighted", weight: 1, elements: [deleteBtn] },
     ],
   };
+}
+
+function _buildDismissButton(): ButtonElement {
+  return {
+    tag: "button",
+    name: "setting_dismiss_btn",
+    text: { tag: "plain_text", content: "关闭" },
+    type: "default",
+    width: "fill",
+    behaviors: [
+      {
+        type: "callback",
+        value: { action: SETTING_ACTION.dismiss },
+      },
+    ],
+  };
+}
+
+/**
+ * Dismiss card swapped in when the user clicks "关闭" on any setting card.
+ * Same neutral shape as `buildSettingResultCard` but with no buttons —
+ * leaving the panel cleanly closed.
+ */
+export function buildSettingDismissedCard(): Card {
+  return buildDismissedCard({ title: "设置面板" });
 }
 
 function _buildDeleteConfirmRow(workspaceId: string): Element {
   const cancelBtn: ButtonElement = {
     tag: "button",
     name: "setting_delete_cancel_btn",
-    text: { tag: "plain_text", content: "取消" },
+    text: { tag: "plain_text", content: "← 返回" },
     type: "default",
     width: "fill",
     behaviors: [
@@ -585,6 +625,12 @@ function _buildDeleteConfirmRow(workspaceId: string): Element {
     horizontal_spacing: "12px",
     columns: [
       { tag: "column", width: "weighted", weight: 1, elements: [cancelBtn] },
+      {
+        tag: "column",
+        width: "weighted",
+        weight: 1,
+        elements: [_buildDismissButton()],
+      },
       { tag: "column", width: "weighted", weight: 1, elements: [confirmBtn] },
     ],
   };
