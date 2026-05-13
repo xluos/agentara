@@ -4,6 +4,7 @@ import type {
   GlobToolUseMessageContent,
   GrepToolUseMessageContent,
   Message,
+  MessageMention,
   ReadToolUseMessageContent,
   SkillToolUseMessageContent,
   ToolSearchToolUseMessageContent,
@@ -83,6 +84,28 @@ export function extractTextContent(
     }
   }
   return result.join("\n\n").trim();
+}
+
+/**
+ * Replace placeholder `key`s with `@<name>` for each provided mention.
+ *
+ * Feishu delivers @-mentions as opaque `@_user_N` tokens in the message
+ * text plus a sibling `mentions` array carrying the real `open_id` and
+ * `name`. Agent runners call this before serializing the prompt so the
+ * underlying LLM sees `@xluos` instead of `@_user_0`. Keys without a
+ * known name are left as-is.
+ */
+export function inlineMentions(
+  text: string,
+  mentions: MessageMention[] | undefined,
+): string {
+  if (!mentions || mentions.length === 0) return text;
+  let result = text;
+  for (const mention of mentions) {
+    if (!mention.name) continue;
+    result = result.replaceAll(mention.key, `@${mention.name}`);
+  }
+  return result;
 }
 
 function extractToolUse(content: ToolUseMessageContent): string {

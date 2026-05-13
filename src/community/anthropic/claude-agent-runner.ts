@@ -8,6 +8,7 @@ import {
   config,
   createLogger,
   extractTextContent,
+  inlineMentions,
   type MessageContent,
   type ToolMessage,
   type AgentRunner,
@@ -43,7 +44,7 @@ export class ClaudeAgentRunner implements AgentRunner {
     const isNew = options?.isNewSession ?? false;
     const signal = options?.signal;
     const textContentOfUserMessage = JSON.stringify(
-      extractTextContent(message),
+      inlineMentions(extractTextContent(message), message.mentions),
     );
 
     const configuredModel = config.agents.default.model;

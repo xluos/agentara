@@ -5,6 +5,7 @@ import {
   config,
   createLogger,
   extractTextContent,
+  inlineMentions,
   resolveInstructionFile,
   uuid,
   type ToolMessage,
@@ -79,7 +80,7 @@ export class CodexAgentRunner implements AgentRunner {
     const signal = options?.signal;
     const resumeId = options.runnerSessionId ?? sessionId;
     const textContentOfUserMessage = JSON.stringify(
-      extractTextContent(message),
+      inlineMentions(extractTextContent(message), message.mentions),
     );
 
     // Sync CLAUDE.md → AGENTS.md on every invocation so Codex CLI always

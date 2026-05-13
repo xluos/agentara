@@ -1,6 +1,7 @@
 import {
   createLogger,
   extractTextContent,
+  inlineMentions,
   type Logger,
   type Message,
 } from "@/shared";
@@ -27,7 +28,9 @@ export class SessionLogWriter implements SessionWriter {
         this._logger.debug(`SYSTEM: ${message.subtype}`);
         break;
       case "user":
-        this._logger.debug(`USER: ${extractTextContent(message)}`);
+        this._logger.debug(
+          `USER: ${inlineMentions(extractTextContent(message), message.mentions)}`,
+        );
         break;
       case "assistant":
         this._logger.debug(

@@ -3,7 +3,13 @@ import { existsSync, unlinkSync } from "node:fs";
 import { and, desc, eq } from "drizzle-orm";
 
 import type { DrizzleDB } from "@/data";
-import { config, createLogger, extractTextContent, uuid } from "@/shared";
+import {
+  config,
+  createLogger,
+  extractTextContent,
+  inlineMentions,
+  uuid,
+} from "@/shared";
 import type { Session as SessionEntity, UserMessage } from "@/shared";
 
 import { getRuntimeDefaultAgentType, resolveAgentTypeAlias } from "../agents";
@@ -159,7 +165,10 @@ export class SessionManager {
     if (options?.firstMessage) {
       this._updateFirstMessage(
         sessionId,
-        extractTextContent(options.firstMessage),
+        inlineMentions(
+          extractTextContent(options.firstMessage),
+          options.firstMessage.mentions,
+        ),
       );
     }
 
