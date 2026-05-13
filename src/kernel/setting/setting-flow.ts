@@ -74,6 +74,17 @@ export class SettingFlow {
       await this._replyText(message, "❌ /setting 需要飞书会话上下文。");
       return;
     }
+    if (!this._isAdmin(message.sender_open_id)) {
+      this._logger.info(
+        { chat_id: chatId, sender_open_id: message.sender_open_id },
+        "rejected /setting from non-admin",
+      );
+      await this._replyText(
+        message,
+        "🚫 你没有 /setting 权限。请联系管理员把你的 open_id 加到 `setting.admin_open_ids`。",
+      );
+      return;
+    }
     const channel = this._feishuChannels.get(message.channel_id);
     if (!channel) {
       await this._replyText(message, "❌ 无法找到对应的飞书 channel。");
@@ -105,6 +116,26 @@ export class SettingFlow {
       this._logger.warn(
         { channel_id: payload.channel_id, action_name: payload.action_name },
         "setting action for unknown channel",
+      );
+      return;
+    }
+    if (!this._isAdmin(payload.operator_open_id)) {
+      this._logger.info(
+        {
+          action_name: payload.action_name,
+          operator_open_id: payload.operator_open_id,
+        },
+        "rejected /setting card action from non-admin",
+      );
+      await this._tryUpdateCard(
+        channel,
+        payload.message_id,
+        buildSettingResultCard(
+          "🚫 你没有 /setting 权限，无法操作此卡片。",
+          [],
+          { show_back: false },
+        ),
+        "non-admin",
       );
       return;
     }
@@ -439,6 +470,18 @@ export class SettingFlow {
         "setting updateRawCard failed",
       );
     }
+  }
+
+  /**
+   * Allowlist gate for `/setting`. Empty `setting.admin_open_ids` means no
+   * restriction (every channel-allowed user may use the panel); otherwise
+   * the sender's open_id must be in the list. Missing `senderOpenId` is
+   * always rejected once a non-empty list is configured.
+   */
+  private _isAdmin(senderOpenId: string | undefined | null): boolean {
+    const adminIds = config.setting.admin_open_ids;
+    if (adminIds.length === 0) return true;
+    return !!senderOpenId && adminIds.includes(senderOpenId);
   }
 
   private async _replyText(message: UserMessage, text: string): Promise<void> {

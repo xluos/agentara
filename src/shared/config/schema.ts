@@ -100,6 +100,21 @@ export const MessagingConfig = z.object({
 export interface MessagingConfig extends z.infer<typeof MessagingConfig> {}
 
 /**
+ * Configuration for the `/setting` admin panel.
+ *
+ * `admin_open_ids` is an explicit allowlist for who may open the panel and
+ * interact with its callback buttons. Empty (the default) means "no
+ * restriction" — backward compatible with existing deployments where the
+ * channel-level whitelist already gates inbound traffic. Non-empty switches
+ * to strict mode: only listed open_ids may run `/setting` and click on its
+ * cards; everyone else gets a plain-text rejection.
+ */
+export const SettingConfig = z.object({
+  admin_open_ids: z.array(z.string()).default([]),
+});
+export interface SettingConfig extends z.infer<typeof SettingConfig> {}
+
+/**
  * Top-level application configuration loaded from config.yaml.
  *
  * The `/setup` catalog lives in `$AGENTARA_HOME/REPOS.md`, not here — see
@@ -113,5 +128,6 @@ export const AppConfig = z.object({
   agents: AgentsConfig,
   tasking: TaskingConfig,
   messaging: MessagingConfig,
+  setting: SettingConfig.default({ admin_open_ids: [] }),
 });
 export interface AppConfig extends z.infer<typeof AppConfig> {}
