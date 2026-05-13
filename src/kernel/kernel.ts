@@ -46,6 +46,7 @@ import { buildCommandCard } from "./commands/cards";
 import { GroupFlow } from "./group/group-flow";
 import { MultiChannelMessageGateway } from "./messaging";
 import { PERMISSION_ACTION, PermissionFlow } from "./permission";
+import { ReposFlow } from "./repos";
 import { SessionManager } from "./sessioning";
 import * as sessioningSchema from "./sessioning/data";
 import { SettingFlow } from "./setting/setting-flow";
@@ -72,6 +73,7 @@ class Kernel {
   private _setupFlow!: SetupFlow;
   private _switchFlow!: SwitchFlow;
   private _settingFlow!: SettingFlow;
+  private _reposFlow!: ReposFlow;
   private _groupFlow!: GroupFlow;
   private _permissionFlow!: PermissionFlow;
   private _codexResumeRestarts = new Map<
@@ -89,6 +91,7 @@ class Kernel {
     this._initSetupFlow();
     this._initSwitchFlow();
     this._initSettingFlow();
+    this._initReposFlow();
     this._initGroupFlow();
     this._initPermissionFlow();
     this._initServer();
@@ -220,6 +223,12 @@ class Kernel {
     });
   }
 
+  private _initReposFlow(): void {
+    this._reposFlow = new ReposFlow({
+      feishuChannels: this._feishuChannels,
+    });
+  }
+
   private _initPermissionFlow(): void {
     this._permissionFlow = new PermissionFlow({
       feishuChannels: this._feishuChannels,
@@ -300,6 +309,13 @@ class Kernel {
     // convenience shortcut for users who only want the workspace view.
     if (text === "/setting" || text === "/workspaces") {
       await this._settingFlow.start(message);
+      return;
+    }
+
+    // Handle /repos command (kernel-owned — interactive card to manage
+    // REPOS.md entries the same way /setting manages workspaces).
+    if (text === "/repos") {
+      await this._reposFlow.start(message);
       return;
     }
 
@@ -583,6 +599,10 @@ class Kernel {
     }
     if (payload.action_name.startsWith("setting_")) {
       await this._settingFlow.handleAction(payload);
+      return;
+    }
+    if (payload.action_name.startsWith("repos_")) {
+      await this._reposFlow.handleAction(payload);
       return;
     }
     this._logger.warn(

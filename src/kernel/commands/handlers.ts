@@ -683,6 +683,7 @@ const HELP_GROUPS: HelpGroup[] = [
       { usage: "/sync", note: "对当前 workspace 下每个仓库 fetch + 快进拉取" },
       { usage: "/clone <git-url> [别名]", note: "克隆仓库到当前群 workspace" },
       { usage: "/checkout <分支>", note: "切换当前活跃仓库的分支" },
+      { usage: "/repos", note: "管理 REPOS.md 中的预设仓库目录" },
     ],
   },
   {
