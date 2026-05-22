@@ -630,11 +630,21 @@ export class TaskDispatcher {
   /**
    * Process a job from the queue. Acquires a per-session lock so that
    * tasks for the same session_id execute serially in FIFO order.
+   *
+   * The serial gate is decoupled from each task's success/failure on
+   * purpose: a failing task still throws (so bunqueue records the failure
+   * and the handler's failure reply reaches the user), but the promise we
+   * publish as the session's lock tail is a *swallowed* view. Otherwise a
+   * single rejection would poison the chain — `.then(onFulfilled)` on the
+   * next task would skip its handler, leaving every later message stuck
+   * "pending" until process restart.
    */
   private async _processJob(job: Job<TaskJobData>): Promise<void> {
     const { payload } = job.data;
     const sessionId = job.data.session_id ?? uuid();
 
+    // `previous` is always a swallowed tail (see below), so it resolves
+    // regardless of how the predecessor finished — the next handler runs.
     const previous = this._sessionLocks.get(sessionId) ?? Promise.resolve();
 
     const current = previous.then(async () => {
@@ -687,11 +697,21 @@ export class TaskDispatcher {
       }
     });
 
-    this._sessionLocks.set(sessionId, current);
-    await current;
+    // Publish a swallowed view as the lock tail so a failure in `current`
+    // can never reject the chain the next task waits on. Keep the handle
+    // for the identity check in cleanup.
+    const tail = current.catch(() => {});
+    this._sessionLocks.set(sessionId, tail);
 
-    if (this._sessionLocks.get(sessionId) === current) {
-      this._sessionLocks.delete(sessionId);
+    try {
+      // Re-throw this task's own failure so bunqueue marks the job failed
+      // and retries per config; successors are unaffected (they chain on
+      // `tail`, not `current`).
+      await current;
+    } finally {
+      if (this._sessionLocks.get(sessionId) === tail) {
+        this._sessionLocks.delete(sessionId);
+      }
     }
   }
 
