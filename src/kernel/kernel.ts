@@ -45,7 +45,7 @@ import {
 import { buildCommandCard } from "./commands/cards";
 import { GroupFlow } from "./group/group-flow";
 import { MultiChannelMessageGateway } from "./messaging";
-import { PERMISSION_ACTION, PermissionFlow } from "./permission";
+import { PERMISSION_ACTION, PermissionFlow, QUESTION_ACTION } from "./permission";
 import { ReposFlow } from "./repos";
 import { SessionManager } from "./sessioning";
 import * as sessioningSchema from "./sessioning/data";
@@ -597,6 +597,10 @@ class Kernel {
     }
     if (payload.action_name === PERMISSION_ACTION) {
       await this._permissionFlow.handleDecide(payload);
+      return;
+    }
+    if (payload.action_name === QUESTION_ACTION) {
+      await this._permissionFlow.handleQuestionSubmit(payload);
       return;
     }
     if (payload.action_name === CODEX_RESUME_RESTART_ACTION) {

@@ -238,6 +238,140 @@ describe("PermissionFlow", () => {
     void next.catch(() => {});
   });
 
+  test("AskUserQuestion resolves 'allow' with answers on submit", async () => {
+    const { fake, channel } = _makeChannel("card_q_1");
+    const flow = new PermissionFlow({
+      feishuChannels: new Map([["ch_1", channel]]),
+    });
+    const promise = flow.request({
+      session_id: "sq",
+      channel_id: "ch_1",
+      chat_id: "oc_chat",
+      initiator_open_id: "ou_alice",
+      tool_name: "AskUserQuestion",
+      tool_input: {
+        questions: [
+          {
+            question: "Pick a format",
+            header: "Format",
+            options: [
+              { label: "Summary", description: "short" },
+              { label: "Detailed", description: "long" },
+            ],
+            multiSelect: false,
+          },
+          {
+            question: "Pick sections",
+            header: "Sections",
+            options: [
+              { label: "Intro", description: "" },
+              { label: "Outro", description: "" },
+            ],
+            multiSelect: true,
+          },
+        ],
+      },
+    });
+    await Promise.resolve();
+    expect(fake.sentCards.length).toBe(1);
+
+    await flow.handleQuestionSubmit(
+      _makePayload({
+        message_id: "card_q_1",
+        operator_open_id: "ou_alice",
+        action_name: "permission_question_submit",
+        // q0 -> option index 1 (Detailed); q1 -> Intro + Outro checked
+        form_value: { q0: "1", q1_o0: true, q1_o1: "true" },
+      }),
+    );
+
+    const decision = await promise;
+    expect(decision.behavior).toBe("allow");
+    expect(decision.decided_by).toBe("user");
+    const input = decision.updated_input as {
+      questions: unknown[];
+      answers: Record<string, unknown>;
+    };
+    expect(input.questions).toHaveLength(2);
+    expect(input.answers["Pick a format"]).toBe("Detailed");
+    expect(input.answers["Pick sections"]).toEqual(["Intro", "Outro"]);
+  });
+
+  test("AskUserQuestion re-renders (no resolve) when a question is unanswered", async () => {
+    const { fake, channel } = _makeChannel("card_q_2");
+    const flow = new PermissionFlow({
+      feishuChannels: new Map([["ch_1", channel]]),
+    });
+    let settled = false;
+    const promise = flow
+      .request({
+        session_id: "sq2",
+        channel_id: "ch_1",
+        chat_id: "oc_chat",
+        initiator_open_id: "ou_alice",
+        tool_name: "AskUserQuestion",
+        tool_input: {
+          questions: [
+            {
+              question: "Pick one",
+              options: [{ label: "A" }, { label: "B" }],
+            },
+          ],
+        },
+      })
+      .then((d) => {
+        settled = true;
+        return d;
+      });
+    await Promise.resolve();
+
+    // Submit with nothing selected -> card updated with a warning, unresolved.
+    await flow.handleQuestionSubmit(
+      _makePayload({
+        message_id: "card_q_2",
+        operator_open_id: "ou_alice",
+        action_name: "permission_question_submit",
+        form_value: {},
+      }),
+    );
+    expect(fake.updatedCards.length).toBe(1);
+    expect(settled).toBe(false);
+
+    // Now answer it for real -> resolves allow.
+    await flow.handleQuestionSubmit(
+      _makePayload({
+        message_id: "card_q_2",
+        operator_open_id: "ou_alice",
+        action_name: "permission_question_submit",
+        form_value: { q0: "0" },
+      }),
+    );
+    const decision = await promise;
+    expect(decision.behavior).toBe("allow");
+    expect(
+      (decision.updated_input as { answers: Record<string, unknown> }).answers[
+        "Pick one"
+      ],
+    ).toBe("A");
+  });
+
+  test("AskUserQuestion denies a malformed payload instead of hanging", async () => {
+    const { fake, channel } = _makeChannel("card_q_3");
+    const flow = new PermissionFlow({
+      feishuChannels: new Map([["ch_1", channel]]),
+    });
+    const decision = await flow.request({
+      session_id: "sq3",
+      channel_id: "ch_1",
+      chat_id: "oc_chat",
+      initiator_open_id: "ou_alice",
+      tool_name: "AskUserQuestion",
+      tool_input: { questions: [] },
+    });
+    expect(decision.behavior).toBe("deny");
+    expect(fake.sentCards.length).toBe(0);
+  });
+
   test("verifyToken is constant-time and rejects bad tokens", () => {
     const { channel } = _makeChannel("card_msg_4");
     const flow = new PermissionFlow({
