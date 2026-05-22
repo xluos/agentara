@@ -71,6 +71,14 @@ export class FeishuMessageChannel
    */
   // eslint-disable-next-line no-unused-vars
   private _resolveWorkspaceCwd?: (chatId: string | undefined) => string;
+  /**
+   * Optional session-cwd resolver injected by the kernel. Given a session id,
+   * returns the absolute cwd that session's agent ran in — the precise base
+   * for resolving outbound relative paths, since a single channel sends
+   * replies for many chats and `config.chatId` alone is not enough.
+   */
+  // eslint-disable-next-line no-unused-vars
+  private _resolveSessionCwd?: (sessionId: string) => string | undefined;
   private _failedCardUpdateMessages = new Set<string>();
   /**
    * Primary message ids for which we've already posted the final
@@ -122,6 +130,8 @@ export class FeishuMessageChannel
       allowedUserEmails?: string[];
       // eslint-disable-next-line no-unused-vars
       resolveWorkspaceCwd?: (chatId: string | undefined) => string;
+      // eslint-disable-next-line no-unused-vars
+      resolveSessionCwd?: (sessionId: string) => string | undefined;
     },
     db: DrizzleDB,
   ) {
@@ -134,6 +144,7 @@ export class FeishuMessageChannel
     this._logger = createLogger("feishu-message-channel");
     this._requireMention = !!config.requireMention;
     this._resolveWorkspaceCwd = config.resolveWorkspaceCwd;
+    this._resolveSessionCwd = config.resolveSessionCwd;
     if (config.allowedUserOpenIds && config.allowedUserOpenIds.length > 0) {
       this._allowedUserOpenIds = new Set(config.allowedUserOpenIds);
     }
@@ -608,9 +619,10 @@ export class FeishuMessageChannel
       this._logOutboundMessage(message.session_id, message.content);
     }
 
+    const baseDir = this._resolveWorkspaceBaseDir(message.session_id);
     const primaryCard = await renderMessageCard(primaryContent, {
       streaming,
-      uploadImage: this.uploadImage.bind(this),
+      uploadImage: (p) => this.uploadImage(p, baseDir),
     });
     const { data: replyMessage } = await this._client.im.message.reply({
       path: { message_id: messageId },
@@ -638,6 +650,7 @@ export class FeishuMessageChannel
         primaryId,
         markdownContinuations,
         replyInThread,
+        message.session_id,
       );
       this._finalizedPrimaries.add(primaryId);
     }
@@ -649,6 +662,7 @@ export class FeishuMessageChannel
       await this._sendFileAttachmentsForFinalText(
         assistantMessage.id,
         message.content,
+        message.session_id,
       );
     }
     return assistantMessage;
@@ -661,9 +675,10 @@ export class FeishuMessageChannel
       this._prepareCardPayload(message.content, false);
     this._logOutboundMessage(message.session_id, message.content);
 
+    const baseDir = this._resolveWorkspaceBaseDir(message.session_id);
     const primaryCard = await renderMessageCard(primaryContent, {
       streaming: false,
-      uploadImage: this.uploadImage.bind(this),
+      uploadImage: (p) => this.uploadImage(p, baseDir),
     });
     const { data } = await this._client.im.message.create({
       params: { receive_id_type: "chat_id" },
@@ -683,6 +698,7 @@ export class FeishuMessageChannel
         primaryId,
         markdownContinuations,
         /* replyInThread */ true,
+        message.session_id,
       );
     }
     this._finalizedPrimaries.add(primaryId);
@@ -693,6 +709,7 @@ export class FeishuMessageChannel
     await this._sendFileAttachmentsForFinalText(
       assistantMessage.id,
       message.content,
+      message.session_id,
     );
 
     const emojis = [
@@ -740,9 +757,10 @@ export class FeishuMessageChannel
       !streaming && typeof startedAt === "number"
         ? Date.now() - startedAt
         : undefined;
+    const baseDir = this._resolveWorkspaceBaseDir(message.session_id);
     const card = await renderMessageCard(primaryContent, {
       streaming,
-      uploadImage: this.uploadImage.bind(this),
+      uploadImage: (p) => this.uploadImage(p, baseDir),
       elapsedMs,
     });
     try {
@@ -778,36 +796,54 @@ export class FeishuMessageChannel
         message.id,
         markdownContinuations,
         /* replyInThread */ true,
+        message.session_id,
       );
     }
     if (!streaming) {
       this._finalizedPrimaries.add(message.id);
-      await this._sendFileAttachmentsForFinalText(message.id, message.content);
+      await this._sendFileAttachmentsForFinalText(
+        message.id,
+        message.content,
+        message.session_id,
+      );
     }
   }
 
   /**
    * Base directory for resolving agent-generated relative paths (markdown
-   * image/file links). The agent runs with its cwd set to the workspace
-   * bound to this chat, so its relative paths are relative to that
-   * workspace — not the global `$AGENTARA_HOME`. Falls back to home when no
-   * resolver was wired (tests, legacy callers).
+   * image/file links). The agent ran with its cwd set to the session's
+   * workspace, so its relative paths are relative to *that* directory — not
+   * the global `$AGENTARA_HOME`, and not necessarily `this.config.chatId`'s
+   * workspace (a single channel serves replies for many chats).
+   *
+   * Resolution order:
+   * 1. The owning session's recorded cwd (most precise — it's exactly where
+   *    the agent wrote the file).
+   * 2. The channel's configured chat workspace (legacy fallback).
+   * 3. Agentara home (tests / unwired callers).
+   *
+   * @param sessionId - Session that produced the outbound message, when known.
    */
-  private _resolveWorkspaceBaseDir(): string {
+  private _resolveWorkspaceBaseDir(sessionId?: string): string {
     return (
-      this._resolveWorkspaceCwd?.(this.config.chatId) ?? config.paths.home
+      (sessionId ? this._resolveSessionCwd?.(sessionId) : undefined) ??
+      this._resolveWorkspaceCwd?.(this.config.chatId) ??
+      config.paths.home
     );
   }
 
   /**
    * Uploads an image to Feishu. Returns the key of the uploaded image.
    * @param path - The path to the image to upload.
+   * @param baseDir - Directory to resolve a relative `path` against. Defaults
+   *   to the channel's configured-chat workspace; callers that know the
+   *   owning session should pass that session's cwd.
    * @returns The key of the uploaded image.
    */
-  async uploadImage(path: string): Promise<string> {
+  async uploadImage(path: string, baseDir?: string): Promise<string> {
     const absPath = nodePath.isAbsolute(path)
       ? path
-      : nodePath.join(this._resolveWorkspaceBaseDir(), path);
+      : nodePath.join(baseDir ?? this._resolveWorkspaceBaseDir(), path);
     const file = fs.readFileSync(absPath);
     this._logger.info(`Uploading image ${absPath}`);
     const res = await this._client.im.v1.image.create({
@@ -828,14 +864,17 @@ export class FeishuMessageChannel
 
   /**
    * Uploads a file to Feishu. Returns the key of the uploaded file.
-   * @param filePath - Absolute path, or a path relative to the chat's
-   *   workspace cwd (agent-generated markdown links).
+   * @param filePath - Absolute path, or a path relative to `baseDir`
+   *   (agent-generated markdown links).
+   * @param baseDir - Directory to resolve a relative `filePath` against.
+   *   Defaults to the channel's configured-chat workspace; callers that know
+   *   the owning session should pass that session's cwd.
    * @returns The key of the uploaded file.
    */
-  async uploadFile(filePath: string): Promise<string> {
+  async uploadFile(filePath: string, baseDir?: string): Promise<string> {
     const absPath = nodePath.isAbsolute(filePath)
       ? filePath
-      : nodePath.join(this._resolveWorkspaceBaseDir(), filePath);
+      : nodePath.join(baseDir ?? this._resolveWorkspaceBaseDir(), filePath);
     const file = fs.createReadStream(absPath);
     const fileName = nodePath.basename(absPath);
     const ext = nodePath.extname(absPath).slice(1).toLowerCase();
@@ -1001,11 +1040,13 @@ export class FeishuMessageChannel
     primaryId: string,
     markdownChunks: string[],
     replyInThread: boolean,
+    sessionId?: string,
   ): Promise<void> {
+    const baseDir = this._resolveWorkspaceBaseDir(sessionId);
     for (const text of markdownChunks) {
       const card = await renderMessageCard([{ type: "text", text }], {
         streaming: false,
-        uploadImage: this.uploadImage.bind(this),
+        uploadImage: (p) => this.uploadImage(p, baseDir),
       });
       await this._client.im.message.reply({
         path: { message_id: primaryId },
@@ -1022,17 +1063,21 @@ export class FeishuMessageChannel
   private async _sendFileAttachmentsForFinalText(
     messageId: string,
     content: AssistantMessage["content"],
+    sessionId?: string,
   ): Promise<void> {
     const lastText = content.filter((c) => c.type === "text").pop();
     if (lastText?.type === "text") {
-      await this._sendLocalFileAttachments(messageId, lastText.text);
+      await this._sendLocalFileAttachments(messageId, lastText.text, sessionId);
     }
   }
 
-  /** Extract local file paths from markdown link syntax [text](path) in text. */
-  private _extractLocalFilePaths(text: string): string[] {
+  /**
+   * Extract local file paths from markdown link syntax [text](path) in text.
+   * Relative paths are resolved against the owning session's workspace cwd.
+   */
+  private _extractLocalFilePaths(text: string, sessionId?: string): string[] {
     const linkRegex = /(?<!!)\[.*?\]\(([^)]+)\)/g;
-    const baseDir = this._resolveWorkspaceBaseDir();
+    const baseDir = this._resolveWorkspaceBaseDir(sessionId);
     const paths: string[] = [];
     let match: RegExpExecArray | null;
     while ((match = linkRegex.exec(text)) !== null) {
@@ -1052,14 +1097,16 @@ export class FeishuMessageChannel
   private async _sendLocalFileAttachments(
     messageId: string,
     text: string,
+    sessionId?: string,
   ): Promise<void> {
-    const filePaths = this._extractLocalFilePaths(text);
+    const filePaths = this._extractLocalFilePaths(text, sessionId);
+    const baseDir = this._resolveWorkspaceBaseDir(sessionId);
     const seen = new Set<string>();
     for (const filePath of filePaths) {
       if (seen.has(filePath)) continue;
       seen.add(filePath);
       try {
-        const fileKey = await this.uploadFile(filePath);
+        const fileKey = await this.uploadFile(filePath, baseDir);
         await this._client.im.message.reply({
           path: { message_id: messageId },
           data: {

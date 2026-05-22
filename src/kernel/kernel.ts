@@ -184,6 +184,12 @@ class Kernel {
           // `$AGENTARA_HOME/workspace/uploads` pool.
           resolveWorkspaceCwd: (chatId) =>
             this._workspaceStore.resolve(chatId).cwd,
+          // Outbound relative paths (agent-generated file/image links) are
+          // relative to the cwd the agent actually ran in. A single channel
+          // serves many chats, so resolve from the owning session, not the
+          // channel's configured chat.
+          resolveSessionCwd: (sessionId) =>
+            this._sessionManager.getSession(sessionId)?.cwd,
         },
         this._database.db,
       );
