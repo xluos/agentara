@@ -259,6 +259,19 @@ export class SessionManager {
   }
 
   /**
+   * Returns the persisted session row, or undefined if not found. Read-only
+   * accessor for commands that need to surface session metadata
+   * (e.g. `/topic` shows agent_type and runner_session_id).
+   */
+  getSession(sessionId: string): SessionEntity | undefined {
+    return this._db
+      .select()
+      .from(sessions)
+      .where(eq(sessions.id, sessionId))
+      .get();
+  }
+
+  /**
    * Removes a session: deletes the database record and the associated JSONL file.
    * @param sessionId - The session identifier.
    * @throws SessionNotFoundError if the session does not exist.

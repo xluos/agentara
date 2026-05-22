@@ -1400,6 +1400,37 @@ export class FeishuMessageChannel
   }
 
   /**
+   * Public lookup of a thread's mapping row: the bound session_id and the
+   * auto-respond flag. Returns undefined when neither the in-memory cache
+   * nor the `feishu_threads` table knows about the thread (e.g. the topic
+   * was just opened and the bot hasn't replied into it yet).
+   *
+   * Used by `/topic` to surface "where am I" info without leaking the
+   * private DB shape.
+   */
+  getThreadInfo(
+    threadId: string,
+  ): { session_id: string; auto_respond: boolean } | undefined {
+    const cached = this._threadState.get(threadId);
+    if (cached) return { ...cached };
+    const row = this._db
+      .select({
+        session_id: feishuThreads.session_id,
+        auto_respond: feishuThreads.auto_respond,
+      })
+      .from(feishuThreads)
+      .where(eq(feishuThreads.thread_id, threadId))
+      .get();
+    if (!row) return undefined;
+    const state = {
+      session_id: row.session_id,
+      auto_respond: row.auto_respond === 1,
+    };
+    this._threadState.set(threadId, state);
+    return { ...state };
+  }
+
+  /**
    * Flip the auto-respond flag on a thread. Persists to DB and updates the
    * in-memory cache so the change takes effect on the very next inbound
    * message. Creates the row if missing, though typically the thread has

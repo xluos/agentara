@@ -459,6 +459,7 @@ class Kernel {
         raw: parsed.raw,
         workspaceStore: this._workspaceStore,
         feishuChannels: this._feishuChannels,
+        sessionManager: this._sessionManager,
         logger: this._logger,
       });
       if (typeof result === "string") {

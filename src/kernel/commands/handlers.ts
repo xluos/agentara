@@ -640,6 +640,53 @@ const unmuteHandler = buildMuteHandler(
 );
 
 /**
+ * Surface the conversation-level identifiers for the current message:
+ * chat / thread / session / agent / runner_session_id, plus the thread's
+ * auto-respond flag. Read-only — purely for the user to copy IDs out when
+ * debugging routing issues or attaching from another tool.
+ */
+const topicHandler: CommandHandler = {
+  name: "topic",
+  description: "/topic — 查看当前话题/会话的标识信息（chat_id / thread_id / session_id 等）",
+  async execute(ctx) {
+    const msg = ctx.message;
+    const chatLabel = msg.chat_type
+      ? `${msg.chat_id ?? "(无)"} (${msg.chat_type === "group" ? "群聊" : "单聊"})`
+      : msg.chat_id ?? "(无)";
+    const lines = [
+      `- Session ID：\`${msg.session_id}\``,
+      `- Thread ID：${msg.thread_id ? `\`${msg.thread_id}\`` : "(不在话题内)"}`,
+      `- Chat ID：${msg.chat_id ? `\`${chatLabel}\`` : "(无飞书会话上下文)"}`,
+      `- Channel ID：${msg.channel_id ? `\`${msg.channel_id}\`` : "(无)"}`,
+    ];
+
+    const session = ctx.sessionManager.getSession(msg.session_id);
+    if (session) {
+      lines.push(`- Agent 类型：\`${session.agent_type}\``);
+      if (session.runner_session_id) {
+        lines.push(`- Runner Session ID：\`${session.runner_session_id}\``);
+      } else {
+        lines.push("- Runner Session ID：(尚未建立)");
+      }
+    } else {
+      lines.push("- 数据库尚无该 session 记录（消息刚到，未持久化）。");
+    }
+
+    if (msg.thread_id && msg.channel_id) {
+      const channel = ctx.feishuChannels.get(msg.channel_id);
+      const info = channel?.getThreadInfo(msg.thread_id);
+      if (info) {
+        lines.push(
+          `- 话题免 @：${info.auto_respond ? "✅ 开启（无需 @ 机器人）" : "❌ 关闭（默认，需 @ 机器人）"}`,
+        );
+      }
+    }
+
+    return cardReply("话题信息", lines);
+  },
+};
+
+/**
  * Grouped `/help` card.
  *
  * A flat list of 15+ commands is noisy, so commands are bucketed by intent
@@ -710,6 +757,7 @@ const HELP_GROUPS: HelpGroup[] = [
   {
     title: "🔕 话题响应",
     commands: [
+      { usage: "/topic", note: "查看当前话题/会话的标识信息（chat_id / thread_id / session_id 等）" },
       { usage: "/mute", note: "让当前话题不再自动响应 @ 提醒" },
       { usage: "/unmute", note: "恢复当前话题的自动响应" },
     ],
@@ -779,6 +827,7 @@ export const BUILTIN_COMMANDS: CommandHandler[] = [
   allowHandler,
   muteHandler,
   unmuteHandler,
+  topicHandler,
 ];
 
 function _formatSyncLine(r: RepoSyncResult): string {

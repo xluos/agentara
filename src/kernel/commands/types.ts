@@ -2,6 +2,7 @@ import type { Logger, UserMessage } from "@/shared";
 
 import type { FeishuMessageChannel } from "../../community/feishu/messaging/message-channel";
 import type { Card } from "../../community/feishu/messaging/types";
+import type { SessionManager } from "../sessioning";
 import type { GroupWorkspaceStore } from "../workspaces";
 
 /**
@@ -26,6 +27,11 @@ export interface CommandContext {
    * whitelist) look up the originating channel via `message.channel_id`.
    */
   feishuChannels: Map<string, FeishuMessageChannel>;
+  /**
+   * Read-only access to persisted session metadata, used by introspection
+   * commands (e.g. `/topic`) to surface agent_type / runner_session_id.
+   */
+  sessionManager: SessionManager;
   logger: Logger;
 }
 
