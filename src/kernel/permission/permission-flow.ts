@@ -538,6 +538,61 @@ export class PermissionFlow {
   }
 
   /**
+   * Mark every still-open permission and question card as expired and resolve
+   * its awaiting promise with a deny. Called on kernel shutdown: the agent
+   * subprocesses that long-poll for these decisions die with the kernel, so a
+   * card left untouched would look live yet never resolve. Best-effort — a
+   * failed card update is logged, not retried.
+   */
+  async expireAllPending(): Promise<void> {
+    const permissionEntries = [...this._pending.values()];
+    const questionEntries = [...this._pendingQuestions.values()];
+    this._pending.clear();
+    this._pendingQuestions.clear();
+
+    for (const entry of permissionEntries) {
+      clearTimeout(entry.timeout);
+      await this._tryUpdateCard(
+        entry.channel_id,
+        entry.card_message_id,
+        buildPermissionResultCard({
+          tool_name: entry.tool_name,
+          outcome: "expired",
+        }),
+        "shutdown-expire",
+      );
+      entry.resolve({
+        behavior: "deny",
+        message: "Kernel is shutting down; permission request expired.",
+        decided_by: "timeout",
+      });
+    }
+    for (const entry of questionEntries) {
+      clearTimeout(entry.timeout);
+      await this._tryUpdateCard(
+        entry.channel_id,
+        entry.card_message_id,
+        buildQuestionResultCard({ outcome: "expired" }),
+        "shutdown-expire",
+      );
+      entry.resolve({
+        behavior: "deny",
+        message: "Kernel is shutting down; question expired.",
+        decided_by: "timeout",
+      });
+    }
+    if (permissionEntries.length > 0 || questionEntries.length > 0) {
+      this._logger.info(
+        {
+          permission_cards: permissionEntries.length,
+          question_cards: questionEntries.length,
+        },
+        "expired open permission/question cards on shutdown",
+      );
+    }
+  }
+
+  /**
    * Forget every tool remembered for the given session. Call on session
    * teardown if you want to release memory eagerly; otherwise the map is
    * cleared on the next kernel restart.

@@ -372,6 +372,39 @@ describe("PermissionFlow", () => {
     expect(fake.sentCards.length).toBe(0);
   });
 
+  test("expireAllPending denies open cards and marks them expired", async () => {
+    const { fake, channel } = _makeChannel("card_exp_1");
+    const flow = new PermissionFlow({
+      feishuChannels: new Map([["ch_1", channel]]),
+    });
+    // One open approval card.
+    const approval = flow.request({
+      session_id: "se",
+      channel_id: "ch_1",
+      chat_id: "oc_chat",
+      initiator_open_id: "ou_alice",
+      tool_name: "Bash",
+      tool_input: {},
+    });
+    await Promise.resolve();
+
+    await flow.expireAllPending();
+
+    const decision = await approval;
+    expect(decision.behavior).toBe("deny");
+    // The card was updated in place to a terminal (expired) result.
+    expect(fake.updatedCards.length).toBe(1);
+
+    // A late click on the now-gone entry must not throw.
+    await flow.handleDecide(
+      _makePayload({
+        message_id: "card_exp_1",
+        operator_open_id: "ou_alice",
+        value: { action: "permission_decide", request_id: "x", decision: "allow" },
+      }),
+    );
+  });
+
   test("verifyToken is constant-time and rejects bad tokens", () => {
     const { channel } = _makeChannel("card_msg_4");
     const flow = new PermissionFlow({

@@ -81,6 +81,7 @@ class Kernel {
     string,
     { sessionId: string; message: UserMessage }
   >();
+  private _shuttingDown = false;
 
   constructor() {
     this._initDatabase();
@@ -245,6 +246,59 @@ class Kernel {
     await this._honoServer.start();
     this._publishPermissionEndpointEnv();
     await this._messageGateway.start();
+    this._registerShutdownHandlers();
+  }
+
+  /**
+   * Graceful shutdown: expire every outstanding interactive card (permission,
+   * clarifying question, codex-resume) so a restart leaves no card that looks
+   * live but can never resolve — the agent subprocesses awaiting them are
+   * killed with this process. Runs while the Feishu channels are still
+   * connected so the in-place card updates land. Idempotent.
+   */
+  async stop(reason?: string): Promise<void> {
+    if (this._shuttingDown) return;
+    this._shuttingDown = true;
+    this._logger.info({ reason }, "kernel shutting down; expiring open cards");
+    try {
+      await this._permissionFlow.expireAllPending();
+      await this._expireCodexResumeCards();
+    } catch (err) {
+      this._logger.error({ err }, "error while expiring cards on shutdown");
+    }
+  }
+
+  /**
+   * Wire SIGINT/SIGTERM to {@link Kernel.stop} so an operator restart or a
+   * `bun --watch` reload expires open cards before the process exits.
+   */
+  private _registerShutdownHandlers(): void {
+    const onSignal = (signal: NodeJS.Signals) => {
+      void this.stop(signal).finally(() => process.exit(0));
+    };
+    process.once("SIGINT", onSignal);
+    process.once("SIGTERM", onSignal);
+  }
+
+  /** Expire any open codex-resume cards left in the in-memory registry. */
+  private async _expireCodexResumeCards(): Promise<void> {
+    const entries = [...this._codexResumeRestarts.entries()];
+    this._codexResumeRestarts.clear();
+    for (const [messageId, pending] of entries) {
+      const channelId = pending.message.channel_id;
+      const channel = channelId
+        ? this._feishuChannels.get(channelId)
+        : undefined;
+      if (!channel) continue;
+      try {
+        await channel.updateRawCard(messageId, buildCodexResumeExpiredCard());
+      } catch (err) {
+        this._logger.warn(
+          { err, message_id: messageId },
+          "failed to expire codex resume card on shutdown",
+        );
+      }
+    }
   }
 
   /**
