@@ -787,6 +787,19 @@ export class FeishuMessageChannel
   }
 
   /**
+   * Base directory for resolving agent-generated relative paths (markdown
+   * image/file links). The agent runs with its cwd set to the workspace
+   * bound to this chat, so its relative paths are relative to that
+   * workspace — not the global `$AGENTARA_HOME`. Falls back to home when no
+   * resolver was wired (tests, legacy callers).
+   */
+  private _resolveWorkspaceBaseDir(): string {
+    return (
+      this._resolveWorkspaceCwd?.(this.config.chatId) ?? config.paths.home
+    );
+  }
+
+  /**
    * Uploads an image to Feishu. Returns the key of the uploaded image.
    * @param path - The path to the image to upload.
    * @returns The key of the uploaded image.
@@ -794,7 +807,7 @@ export class FeishuMessageChannel
   async uploadImage(path: string): Promise<string> {
     const absPath = nodePath.isAbsolute(path)
       ? path
-      : nodePath.join(config.paths.home, path);
+      : nodePath.join(this._resolveWorkspaceBaseDir(), path);
     const file = fs.readFileSync(absPath);
     this._logger.info(`Uploading image ${absPath}`);
     const res = await this._client.im.v1.image.create({
@@ -815,14 +828,14 @@ export class FeishuMessageChannel
 
   /**
    * Uploads a file to Feishu. Returns the key of the uploaded file.
-   * @param filePath - Absolute path, or a path relative to the home
-   *   directory (legacy agent-generated markdown links).
+   * @param filePath - Absolute path, or a path relative to the chat's
+   *   workspace cwd (agent-generated markdown links).
    * @returns The key of the uploaded file.
    */
   async uploadFile(filePath: string): Promise<string> {
     const absPath = nodePath.isAbsolute(filePath)
       ? filePath
-      : nodePath.join(config.paths.home, filePath);
+      : nodePath.join(this._resolveWorkspaceBaseDir(), filePath);
     const file = fs.createReadStream(absPath);
     const fileName = nodePath.basename(absPath);
     const ext = nodePath.extname(absPath).slice(1).toLowerCase();
@@ -1019,6 +1032,7 @@ export class FeishuMessageChannel
   /** Extract local file paths from markdown link syntax [text](path) in text. */
   private _extractLocalFilePaths(text: string): string[] {
     const linkRegex = /(?<!!)\[.*?\]\(([^)]+)\)/g;
+    const baseDir = this._resolveWorkspaceBaseDir();
     const paths: string[] = [];
     let match: RegExpExecArray | null;
     while ((match = linkRegex.exec(text)) !== null) {
@@ -1026,7 +1040,7 @@ export class FeishuMessageChannel
       if (!filePath || filePath.includes("://")) continue;
       const absPath = nodePath.isAbsolute(filePath)
         ? filePath
-        : nodePath.join(config.paths.home, filePath);
+        : nodePath.join(baseDir, filePath);
       if (fs.existsSync(absPath)) {
         paths.push(filePath);
       }
