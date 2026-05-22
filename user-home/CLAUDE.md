@@ -19,7 +19,11 @@ Then read `USER.md` to recall who the user is, his preferences, ongoing context,
 
 ## Folder Structure
 
+Your current working directory **is** the workspace root. All your work and
+outputs live directly here — there is no extra `workspace/` wrapper folder.
+
 ```
+.  (workspace root = your cwd)
 ├── .claude/               # Claude/Cursor configuration
 │   ├── skills/            # Your skills (one folder per skill); Newly added skills should be placed here.
 │   └── CLAUDE.md          # This file; workspace rules and conventions
@@ -27,11 +31,11 @@ Then read `USER.md` to recall who the user is, his preferences, ongoing context,
 |   ├── logs/              # Daily dialogue logs, `{YYYY-MM-DD}.md`
 │   ├── SOUL.md            # Your identity, principles, capabilities
 │   └── USER.md            # User preferences, context, history
-└── workspace/             # Workspace root. All your work and outputs should be stored here.
-    ├── wikis/             # Knowledge base (Obsidian-style; see wiki skill)
-    ├── projects/          # Git repos and code projects
-    ├── uploads/           # Uploaded files: images, videos, audio, documents, etc.
-    └── outputs/           # Generated outputs: reports, images, videos; organized in sub-folders
+├── REPOS.md               # Catalog of git repos synced into this workspace
+├── <repo>/                # Git repos are checked out directly at the root (see REPOS.md), one folder per repo
+├── wikis/                 # Knowledge base (Obsidian-style; see wiki skill)
+├── uploads/               # Uploaded files: images, videos, audio, documents, etc.
+└── outputs/               # Generated outputs: reports, images, videos; organized in sub-folders
 ```
 
 > Create if not exists. Create subdirectories as needed.
@@ -67,8 +71,9 @@ Dense, telegraphic short sentences. No filler words ("You are", "You should", "Y
 - Use `<font color="{color}">{text}</font>` only for text color.
 - Use Markdown `**text**` for emphasis. Do not use HTML bold tags such as `<b>...</b>`.
 - When you need both color and emphasis, wrap Markdown emphasis inside the font tag, for example `<font color="green">**important**</font>`.
-- For IM outbound messages, only real files under `workspace/uploads/` or `workspace/outputs/` should be sent to users. Do not reference `workspace/projects/` files directly unless you first copy or export them into those user-facing directories.
-- To send a non-image file, use a normal Markdown link to the local file, for example `[report.pdf](workspace/outputs/reports/report.pdf)`.
-- To send an inline image, use Markdown image syntax to a local image file or valid remote image URL, for example `![chart](workspace/outputs/charts/chart.png)`.
+- For IM outbound messages, only real files under `uploads/` or `outputs/` should be sent to users. Do not reference files inside a checked-out repo directly unless you first copy or export them into those user-facing directories.
+- Use paths relative to the workspace root (your cwd). Do not prefix them with `workspace/` — there is no such wrapper folder.
+- To send a non-image file, use a normal Markdown link to the local file, for example `[report.pdf](outputs/reports/report.pdf)`.
+- To send an inline image, use Markdown image syntax to a local image file or valid remote image URL, for example `![chart](outputs/charts/chart.png)`.
 - Do not use absolute paths, `file://` URLs, inline-code paths, or plain text paths when you want the messaging channel to send a file or render an image.
 - Do not apply any agent team or sub-agent/sub-task to perform this skill. This skill is a single agent.
