@@ -158,11 +158,14 @@ export class ClaudeAgentRunner implements AgentRunner {
           ? decoder.decode(Bun.concatArrayBuffers(stderrChunks))
           : "";
       const parts: string[] = [];
+      // stdout is the (already-parsed) stream-json — can be megabytes, so
+      // keep only a short tail where a trailing error result would land.
+      // stderr carries the actual failure reason, so allow it more room.
       if (stdoutRaw.trim()) {
-        parts.push(`Stdout:\n${stdoutRaw.trim()}`);
+        parts.push(`Stdout:\n${_clipTail(stdoutRaw.trim(), 800)}`);
       }
       if (stderrText.trim()) {
-        parts.push(`Stderr:\n${stderrText.trim()}`);
+        parts.push(`Stderr:\n${_clipTail(stderrText.trim(), 3000)}`);
       }
       const detail = parts.length > 0 ? `\n\n${parts.join("\n\n")}` : "";
       throw new Error(`Claude Code exited with code ${exitCode}${detail}`);
@@ -231,6 +234,17 @@ export class ClaudeAgentRunner implements AgentRunner {
 
 function containsToolResult(message: { content: MessageContent[] }): boolean {
   return message.content.some((content) => content.type === "tool_result");
+}
+
+/**
+ * Keep only the trailing `maxChars` of `text` (errors surface at the end),
+ * prefixing a marker noting how much was dropped. Returns `text` unchanged
+ * when it already fits.
+ */
+function _clipTail(text: string, maxChars: number): string {
+  if (text.length <= maxChars) return text;
+  const dropped = text.length - maxChars;
+  return `… [${dropped} chars truncated]\n${text.slice(-maxChars)}`;
 }
 
 interface PermissionBridge {
