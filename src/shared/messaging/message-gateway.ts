@@ -1,7 +1,7 @@
 import type EventEmitter from "eventemitter3";
 
 import type { CardActionPayload, MessageChannel } from "./message-channel";
-import type { AssistantMessage, UserMessage } from "./types";
+import type { AssistantMessage, CardFooterStats, UserMessage } from "./types";
 
 /** Event types emitted by a message gateway. */
 export interface MessageGatewayEventTypes {
@@ -69,12 +69,16 @@ export interface MessageGateway extends EventEmitter<MessageGatewayEventTypes> {
    * Update the content of an existing message.
    * @param message - The assistant message with updated content.
    * @param options - Optional settings. `channelId` bypasses the session→channel
-   *   DB lookup.
+   *   DB lookup. `footer` carries context / quota stats for the finalized card.
    */
   updateMessageContent(
     // eslint-disable-next-line no-unused-vars
     message: AssistantMessage,
     // eslint-disable-next-line no-unused-vars
-    options?: { streaming?: boolean; channelId?: string },
+    options?: {
+      streaming?: boolean;
+      channelId?: string;
+      footer?: CardFooterStats;
+    },
   ): Promise<void>;
 }

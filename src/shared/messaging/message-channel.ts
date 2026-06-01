@@ -1,6 +1,6 @@
 import type EventEmitter from "eventemitter3";
 
-import type { AssistantMessage, UserMessage } from "./types";
+import type { AssistantMessage, CardFooterStats, UserMessage } from "./types";
 
 /**
  * Payload delivered when a user interacts with an interactive card. The
@@ -83,12 +83,15 @@ export interface MessageChannel extends EventEmitter {
   /**
    * Update the content of an existing message.
    * @param message - The assistant message with updated content.
-   * @param options - Optional settings (e.g. streaming mode).
+   * @param options - Optional settings.
+   *   - `streaming`: card is mid-stream; skip final-only rendering.
+   *   - `footer`: context / quota stats to render at the bottom of a
+   *     finalized card. Ignored while streaming.
    */
   updateMessageContent(
     // eslint-disable-next-line no-unused-vars
     message: AssistantMessage,
     // eslint-disable-next-line no-unused-vars
-    options?: { streaming?: boolean },
+    options?: { streaming?: boolean; footer?: CardFooterStats },
   ): Promise<void>;
 }

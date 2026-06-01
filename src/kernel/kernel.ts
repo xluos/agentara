@@ -1,3 +1,7 @@
+import {
+  contextLimitForModel,
+  getClaudeUsageCached,
+} from "@/community/anthropic";
 import { FeishuMessageChannel } from "@/community/feishu";
 import * as feishuMessagingSchema from "@/community/feishu/messaging/data";
 import type { Card } from "@/community/feishu/messaging/types";
@@ -7,7 +11,12 @@ import { DataConnection } from "@/data";
 // runner with the registry at load time. This must happen before any
 // session dispatch so `agents.default.type` can resolve plugin types.
 import "@/plugins";
-import type { AssistantMessage, CardActionPayload, UserMessage } from "@/shared";
+import type {
+  AssistantMessage,
+  CardActionPayload,
+  CardFooterStats,
+  UserMessage,
+} from "@/shared";
 import {
   config,
   createLogger,
@@ -726,6 +735,10 @@ class Kernel {
     );
     contents = [];
     let lastMessage: AssistantMessage | undefined;
+    // Footer stats come from the most recent turn that actually reported
+    // usage — trailing synthetic messages (compaction notices) carry no
+    // usage/model and would otherwise blank out the footer.
+    let lastUsageMessage: AssistantMessage | undefined;
     try {
       const stream = await session.stream(inboundMessage, { signal });
       for await (const message of stream) {
@@ -738,6 +751,7 @@ class Kernel {
             },
           );
           lastMessage = message;
+          if (message.usage) lastUsageMessage = message;
         }
       }
       if (!lastMessage) {
@@ -779,9 +793,59 @@ class Kernel {
       { ...outboundMessage, content: contents },
       {
         streaming: false,
+        footer: await this._buildCardFooter(lastUsageMessage),
       },
     );
   };
+
+  /**
+   * Assemble the finalized card's footer stats: context-window occupancy
+   * for the latest turn (from the agent's reported token usage) plus the
+   * account's rolling 5-hour / 7-day quota. Scoped to runs that surface
+   * token usage (Claude) — other runners get no footer. Best-effort: a
+   * failed quota lookup still returns the context bar, and any error
+   * yields `undefined` so a footer never breaks a reply.
+   */
+  private async _buildCardFooter(
+    lastMessage?: AssistantMessage,
+  ): Promise<CardFooterStats | undefined> {
+    const usage = lastMessage?.usage;
+    if (!usage) return undefined;
+    try {
+      const stats: CardFooterStats = {};
+      // Prefer the model the runner actually resolved; fall back to the
+      // configured one (often unset). Used for both display and the
+      // context-window limit.
+      const model = lastMessage?.model ?? config.agents.default.model;
+      if (model) stats.model = model;
+      const usedTokens =
+        (usage.input_tokens ?? 0) +
+        (usage.cache_read_input_tokens ?? 0) +
+        (usage.cache_creation_input_tokens ?? 0) +
+        (usage.output_tokens ?? 0);
+      if (usedTokens > 0) {
+        stats.context = {
+          used_tokens: usedTokens,
+          limit_tokens: contextLimitForModel(model),
+        };
+      }
+      const quota = await getClaudeUsageCached();
+      if (quota) {
+        stats.five_hour = {
+          utilization: quota.five_hour.utilization,
+          resets_at: quota.five_hour.resets_at,
+        };
+        stats.seven_day = {
+          utilization: quota.seven_day.utilization,
+          resets_at: quota.seven_day.resets_at,
+        };
+      }
+      return Object.keys(stats).length > 0 ? stats : undefined;
+    } catch (err) {
+      this._logger.warn({ err }, "failed to build card footer stats");
+      return undefined;
+    }
+  }
 
   private async _handleCodexMissingResume(
     err: CodexMissingResumeError,

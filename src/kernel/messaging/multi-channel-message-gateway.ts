@@ -5,6 +5,7 @@ import type { DrizzleDB } from "@/data";
 import type {
   AssistantMessage,
   CardActionPayload,
+  CardFooterStats,
   MessageChannel,
   MessageGateway,
   MessageGatewayEventTypes,
@@ -115,7 +116,7 @@ export class MultiChannelMessageGateway
    */
   async updateMessageContent(
     message: AssistantMessage,
-    options?: { streaming?: boolean; channelId?: string },
+    options?: { streaming?: boolean; channelId?: string; footer?: CardFooterStats },
   ): Promise<void> {
     const channel = this._resolveChannelFor(message.session_id, options?.channelId);
     await channel.updateMessageContent(message, options);

@@ -90,6 +90,21 @@ export const UserMessage = BaseMessage.extend({
 export interface UserMessage extends z.infer<typeof UserMessage> {}
 
 /**
+ * Token accounting for a single model turn, mirrored from the agent's
+ * raw response. All fields are optional because not every runner reports
+ * usage (e.g. Codex omits it). The cache fields are part of the context
+ * window occupancy too — Claude counts prompt-cache reads/writes as input
+ * that still occupies the window.
+ */
+export const MessageUsage = z.object({
+  input_tokens: z.number().optional(),
+  output_tokens: z.number().optional(),
+  cache_read_input_tokens: z.number().optional(),
+  cache_creation_input_tokens: z.number().optional(),
+});
+export interface MessageUsage extends z.infer<typeof MessageUsage> {}
+
+/**
  * The assistant message.
  */
 export const AssistantMessage = BaseMessage.extend({
@@ -102,6 +117,18 @@ export const AssistantMessage = BaseMessage.extend({
       ToolUseMessageContent,
     ]),
   ),
+  /**
+   * Token usage reported for the turn that produced this message. Used to
+   * derive context-window occupancy for the card footer. Absent for runners
+   * that don't surface usage.
+   */
+  usage: MessageUsage.optional(),
+  /**
+   * Resolved model id the agent actually ran (e.g. `claude-opus-4-1`).
+   * Reported by the runner — the config may leave the model unpinned, so
+   * this is the only reliable source for what served the turn.
+   */
+  model: z.string().optional(),
 });
 export interface AssistantMessage extends z.infer<typeof AssistantMessage> {}
 

@@ -13,6 +13,7 @@ import {
   uuid,
   type AssistantMessage,
   type CardActionPayload,
+  type CardFooterStats,
   type MessageChannel,
   type MessageChannelEventTypes,
   type UserMessage,
@@ -740,7 +741,10 @@ export class FeishuMessageChannel
   /** Update the content of an existing Feishu message. */
   async updateMessageContent(
     message: AssistantMessage,
-    { streaming = true }: { streaming?: boolean } = {},
+    {
+      streaming = true,
+      footer,
+    }: { streaming?: boolean; footer?: CardFooterStats } = {},
   ): Promise<void> {
     if (this._failedCardUpdateMessages.has(message.id)) {
       return;
@@ -762,6 +766,7 @@ export class FeishuMessageChannel
       streaming,
       uploadImage: (p) => this.uploadImage(p, baseDir),
       elapsedMs,
+      footer,
     });
     try {
       await this._client.im.message.patch({

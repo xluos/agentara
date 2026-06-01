@@ -5,6 +5,7 @@ import {
   config,
   type AssistantMessage,
   type BashToolUseMessageContent,
+  type CardFooterStats,
   type EditToolUseMessageContent,
   type GlobToolUseMessageContent,
   type GrepToolUseMessageContent,
@@ -75,6 +76,8 @@ const _SUMMARY_PREVIEW_CHARS = 180;
  *     provided and `streaming` is false, the card renders a small grey
  *     note at the bottom like "Done in 12.8s" so users can see how long
  *     the run took.
+ *   - `footer`: optional context / quota stats rendered as small grey
+ *     progress bars beneath the "Done in" note on a finalized card.
  * @returns Feishu Card object for API payload.
  */
 export async function renderMessageCard(
@@ -83,11 +86,13 @@ export async function renderMessageCard(
     streaming,
     uploadImage,
     elapsedMs,
+    footer,
   }: {
     streaming: boolean;
     // eslint-disable-next-line no-unused-vars
     uploadImage: (path: string) => Promise<string>;
     elapsedMs?: number;
+    footer?: CardFooterStats;
   },
 ): Promise<Card> {
   const stepPanel: CollapsiblePanel = {
@@ -195,18 +200,110 @@ export async function renderMessageCard(
         color: "grey",
       },
     });
-  } else if (typeof elapsedMs === "number" && elapsedMs >= 0) {
-    card.body.elements.push({
-      tag: "div",
-      text: {
-        tag: "plain_text",
-        text_color: "grey",
-        text_size: "notation",
-        content: `Done in ${_formatDuration(elapsedMs)}`,
-      },
-    });
+  } else {
+    const footerLines: string[] = [];
+    if (typeof elapsedMs === "number" && elapsedMs >= 0) {
+      footerLines.push(`Done in ${_formatDuration(elapsedMs)}`);
+    }
+    footerLines.push(..._renderFooterStats(footer));
+    if (footerLines.length > 0) {
+      card.body.elements.push({
+        tag: "div",
+        text: {
+          tag: "plain_text",
+          text_color: "grey",
+          text_size: "notation",
+          content: footerLines.join("\n"),
+        },
+      });
+    }
   }
   return card;
+}
+
+/** Fixed width (in cells) of every footer progress bar. */
+const FOOTER_BAR_WIDTH = 12;
+
+/**
+ * Build the context / quota progress-bar lines for the card footer. Each
+ * line is `<label> <bar> <pct>% <detail>`, with labels padded to a common
+ * width so the bars line up. Returns an empty list when no stats apply.
+ */
+function _renderFooterStats(footer?: CardFooterStats): string[] {
+  if (!footer) return [];
+  const lines: string[] = [];
+  if (footer.model) {
+    lines.push(`${_padLabel("Model")} ${footer.model}`);
+  }
+  if (footer.context) {
+    const { used_tokens, limit_tokens } = footer.context;
+    const pct = limit_tokens > 0 ? (used_tokens / limit_tokens) * 100 : 0;
+    lines.push(
+      `${_padLabel("Context")} ${_renderBar(pct)} ${_formatPercent(pct)}  ` +
+        `${_formatTokens(used_tokens)}/${_formatTokens(limit_tokens)}`,
+    );
+  }
+  if (footer.five_hour) {
+    lines.push(
+      `${_padLabel("5h limit")} ${_renderBar(footer.five_hour.utilization)} ` +
+        `${_formatPercent(footer.five_hour.utilization)}` +
+        `${_formatResetsIn(footer.five_hour.resets_at)}`,
+    );
+  }
+  if (footer.seven_day) {
+    lines.push(
+      `${_padLabel("Weekly")} ${_renderBar(footer.seven_day.utilization)} ` +
+        `${_formatPercent(footer.seven_day.utilization)}` +
+        `${_formatResetsIn(footer.seven_day.resets_at)}`,
+    );
+  }
+  return lines;
+}
+
+/** Right-pad a footer label to a common width so bars align. */
+function _padLabel(label: string): string {
+  return label.padEnd(8, " ");
+}
+
+/** Clamp a 0..100 percentage and render it as a block-character bar. */
+function _renderBar(pct: number, width: number = FOOTER_BAR_WIDTH): string {
+  const clamped = Math.max(0, Math.min(100, pct));
+  const filled = Math.round((clamped / 100) * width);
+  return "█".repeat(filled) + "░".repeat(width - filled);
+}
+
+/** Render a percentage as an integer with a trailing `%`. */
+function _formatPercent(pct: number): string {
+  return `${Math.round(Math.max(0, Math.min(100, pct)))}%`;
+}
+
+/** Compact token count, e.g. 76000 -> "76k", 1500 -> "1.5k", 1e6 -> "1M". */
+function _formatTokens(n: number): string {
+  if (n >= 1_000_000) {
+    const m = n / 1_000_000;
+    return Number.isInteger(m) ? `${m}M` : `${m.toFixed(1)}M`;
+  }
+  if (n < 1000) return `${n}`;
+  const k = n / 1000;
+  if (k >= 100 || Number.isInteger(k)) return `${Math.round(k)}k`;
+  return `${k.toFixed(1)}k`;
+}
+
+/**
+ * Human-friendly " · resets in 2h 13m" suffix from an ISO timestamp.
+ * Returns an empty string when the reset time is unknown or already past.
+ */
+function _formatResetsIn(resetsAt: string | null): string {
+  if (!resetsAt) return "";
+  const diffMs = new Date(resetsAt).getTime() - Date.now();
+  if (!Number.isFinite(diffMs) || diffMs <= 0) return " · resets soon";
+  const totalMinutes = Math.floor(diffMs / 60000);
+  const days = Math.floor(totalMinutes / 1440);
+  const hours = Math.floor((totalMinutes % 1440) / 60);
+  const minutes = totalMinutes % 60;
+  if (days > 0) return ` · resets in ${days}d ${hours}h`;
+  if (hours > 0) return ` · resets in ${hours}h ${minutes}m`;
+  return ` · resets in ${minutes}m`;
 }
 
 /**

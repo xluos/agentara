@@ -196,6 +196,30 @@ export class ClaudeAgentRunner implements AgentRunner {
           role,
           content: obj.message.content,
         };
+        // Carry token usage + resolved model on assistant turns so
+        // downstream consumers can surface context-window occupancy and
+        // which model served the turn. Claude streams both on each
+        // `assistant` event under `message.usage` / `message.model`.
+        if (role === "assistant") {
+          if (obj.message?.usage) {
+            const u = obj.message.usage;
+            (message as AssistantMessage).usage = {
+              input_tokens: u.input_tokens,
+              output_tokens: u.output_tokens,
+              cache_read_input_tokens: u.cache_read_input_tokens,
+              cache_creation_input_tokens: u.cache_creation_input_tokens,
+            };
+          }
+          // Skip Claude's `<synthetic>` placeholder model (compaction
+          // notices and other locally-generated messages) so it never
+          // leaks into the displayed model name.
+          if (
+            typeof obj.message?.model === "string" &&
+            obj.message.model !== "<synthetic>"
+          ) {
+            (message as AssistantMessage).model = obj.message.model;
+          }
+        }
         return message;
       }
       return null;

@@ -115,6 +115,83 @@ describe("renderMessageCard final text", () => {
   });
 });
 
+describe("renderMessageCard footer stats", () => {
+  const findFooter = (card: Awaited<ReturnType<typeof renderMessageCard>>) =>
+    card.body.elements
+      .map((e) => e as { tag: string; text?: { content: string } })
+      .filter((e) => e.tag === "div" && typeof e.text?.content === "string")
+      .map((e) => e.text!.content)
+      .find((c) => c.includes("Context") || c.includes("limit"));
+
+  test("renders context + quota progress bars on a finalized card", async () => {
+    const content = [
+      { type: "text", text: "done" },
+    ] as AssistantMessage["content"];
+    const card = await renderMessageCard(content, {
+      streaming: false,
+      uploadImage: noopUpload,
+      elapsedMs: 1200,
+      footer: {
+        model: "claude-opus-4-1",
+        context: { used_tokens: 50_000, limit_tokens: 200_000 },
+        five_hour: { utilization: 18, resets_at: null },
+        seven_day: { utilization: 52, resets_at: null },
+      },
+    });
+    const footer = findFooter(card);
+    expect(footer).toBeDefined();
+    expect(footer).toContain("Done in");
+    expect(footer).toContain("Model");
+    expect(footer).toContain("claude-opus-4-1");
+    expect(footer).toContain("Context");
+    expect(footer).toContain("25%"); // 50k / 200k
+    expect(footer).toContain("50k/200k");
+    expect(footer).toContain("5h limit");
+    expect(footer).toContain("18%");
+    expect(footer).toContain("Weekly");
+    expect(footer).toContain("52%");
+    expect(footer).toMatch(/[█░]/);
+  });
+
+  test("renders the 1M window as '1M' and never overflows 100%", async () => {
+    const content = [
+      { type: "text", text: "done" },
+    ] as AssistantMessage["content"];
+    const card = await renderMessageCard(content, {
+      streaming: false,
+      uploadImage: noopUpload,
+      footer: {
+        context: { used_tokens: 339_000, limit_tokens: 1_000_000 },
+      },
+    });
+    const footer = findFooter(card);
+    expect(footer).toContain("339k/1M");
+    expect(footer).toContain("34%");
+    expect(footer).not.toContain("100%");
+  });
+
+  test("omits bars while streaming", async () => {
+    const content = [thinking("x")] as AssistantMessage["content"];
+    const card = await renderMessageCard(content, {
+      streaming: true,
+      uploadImage: noopUpload,
+      footer: { context: { used_tokens: 1, limit_tokens: 2 } },
+    });
+    expect(findFooter(card)).toBeUndefined();
+  });
+
+  test("no footer element when there are no stats and no elapsed time", async () => {
+    const content = [
+      { type: "text", text: "done" },
+    ] as AssistantMessage["content"];
+    const card = await renderMessageCard(content, {
+      streaming: false,
+      uploadImage: noopUpload,
+    });
+    expect(findFooter(card)).toBeUndefined();
+  });
+});
+
 describe("splitMarkdownByBytes", () => {
   test("returns a single chunk when already under budget", () => {
     const chunks = splitMarkdownByBytes("hello world", 1024);
