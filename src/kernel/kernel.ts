@@ -36,6 +36,7 @@ import {
   buildNewCommandUsageReply,
   buildUnknownCommandReply,
   CommandRegistry,
+  isPassthroughCommand,
   createFreshUserMessage,
   extractNewPrompt,
   isNewCommand,
@@ -396,15 +397,23 @@ class Kernel {
       return;
     }
 
-    // Gateway-level slash commands: any `/`-prefixed message must be
-    // resolved here. If it's not a registered command, reply with an
-    // error rather than forwarding to the agent — passing `/typo` on
-    // to the LLM wastes a turn and confuses users who just mistyped
-    // a command name.
+    // Gateway-level slash commands: any `/`-prefixed message is resolved
+    // here first.
+    //   1. Registered command → run it and stop.
+    //   2. Passthrough-whitelisted (e.g. `/compact`) → fall through to the
+    //      normal agent dispatch so the underlying CLI (Claude Code) handles
+    //      its own slash command.
+    //   3. Anything else → reply "unknown command" rather than wasting an
+    //      agent turn on a likely typo.
     if (text.startsWith("/")) {
       const handled = await this._tryHandleCommand(message, text);
-      if (!handled) await this._replyUnknownCommand(message, text);
-      return;
+      if (handled) return;
+      const parsed = parseCommand(text);
+      if (!parsed || !isPassthroughCommand(parsed.name)) {
+        await this._replyUnknownCommand(message, text);
+        return;
+      }
+      // Whitelisted passthrough — fall through to the agent dispatch below.
     }
 
     // On the first message of a new session, kick off a best-effort
