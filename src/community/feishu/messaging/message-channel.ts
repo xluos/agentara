@@ -1419,7 +1419,15 @@ export class FeishuMessageChannel
       },
       "card action",
     );
-    this.emit("card:action", payload);
+    // Defer downstream dispatch to a later macrotask so the synchronous ack
+    // below reaches Feishu first. `emit` runs listeners synchronously, and a
+    // handler may do blocking sync work (e.g. workspace deletion calls
+    // `rmSync` on a directory tree), which would otherwise stall the event
+    // loop before this function can return its ack — causing the card button
+    // to hit Feishu's callback timeout while the work is still running.
+    setTimeout(() => {
+      this.emit("card:action", payload);
+    }, 0);
     // Acknowledge the action back to Feishu via the WS response (the SDK
     // base64-encodes this as respPayload.data). Without an ack, the card UI
     // can surface a generic failure toast while the real work happens
