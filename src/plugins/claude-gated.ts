@@ -11,22 +11,21 @@ import {
   type UserMessage,
 } from "@/shared";
 
-import { detectCountry } from "./_country-check";
-
 const _logger = createLogger("claude-gated");
-const COUNTRY_CHECK_TIMEOUT_MS = 5000;
+const CLASH_CONTROLLER_SOCKET = "/tmp/verge/verge-mihomo.sock";
+const HTTP_PROXY_CHECK_URL = "http://www.gstatic.com/generate_204";
+const PROXY_READY_TIMEOUT_MS = 5000;
 
 /**
  * Wraps {@link ClaudeAgentRunner} with the safety preamble the user runs
  * in zshrc before invoking the real `claude` CLI:
  *
  *   1. Resolve a proxy URL (from `agents.env.HTTPS_PROXY` / `HTTP_PROXY`)
- *      and use it both for the country-detection fetch and for the
+ *      and use it both for the local proxy readiness check and for the
  *      delegated spawn's env.
- *   2. Call the IP-geolocation probes in {@link detectCountry} with a 5s
- *      timeout. Abort the dispatch if the country is not `US` or if
- *      every probe failed — we'd rather raise a clear error than let the
- *      agent burn tokens against a blocked egress.
+ *   2. Check whether Clash Verge/Mihomo TUN is enabled, or whether the
+ *      configured local HTTP proxy can fetch a lightweight connectivity URL.
+ *      Abort only when both are unavailable.
  *   3. Delegate to the built-in Claude runner, carrying the proxy through
  *      via `envExtras` so the inner spawn actually goes through it, and
  *      force `--dangerously-skip-permissions` on — this wrapper exists for
@@ -45,21 +44,13 @@ class ClaudeGatedRunner implements AgentRunner {
   ): AsyncIterableIterator<SystemMessage | AssistantMessage | ToolMessage> {
     const proxy = _resolveProxy();
 
-    const country = await detectCountry({
-      proxy,
-      timeoutMs: COUNTRY_CHECK_TIMEOUT_MS,
-    });
-    if (country === null) {
+    const readyVia = await _clashProxyReady(proxy);
+    if (readyVia === null) {
       throw new Error(
-        "无法判定当前出口 IP 所在国家/地区，已拦截 Claude 启动（claude-gated）。",
+        "Clash TUN 未开启，HTTP 代理也不可用，已拦截 Claude 启动（claude-gated）。",
       );
     }
-    if (country !== "US") {
-      throw new Error(
-        `检测到当前出口 IP 不在美国（country=${country}），已拦截 Claude 启动（claude-gated）。`,
-      );
-    }
-    _logger.info({ country }, "country gate passed");
+    _logger.info({ readyVia }, "clash proxy gate passed");
 
     const mergedOptions: AgentRunOptions = {
       ...options,
@@ -76,6 +67,71 @@ class ClaudeGatedRunner implements AgentRunner {
     };
 
     yield* this._inner.stream(message, mergedOptions);
+  }
+}
+
+async function _clashProxyReady(proxy: string | undefined): Promise<string | null> {
+  if (await _isClashTunEnabled()) return "tun";
+  if (proxy && (await _isHttpProxyReady(proxy))) return "http-proxy";
+  return null;
+}
+
+async function _isClashTunEnabled(): Promise<boolean> {
+  try {
+    const result = await _runCurl(
+      [
+        "-fsS",
+        "--unix-socket",
+        CLASH_CONTROLLER_SOCKET,
+        "http://localhost/configs",
+      ],
+      PROXY_READY_TIMEOUT_MS,
+    );
+    if (result.exitCode !== 0) return false;
+    const configs = JSON.parse(result.stdout) as {
+      tun?: { enable?: unknown };
+    };
+    return configs.tun?.enable === true;
+  } catch (err) {
+    _logger.debug({ err }, "clash tun readiness check failed");
+    return false;
+  }
+}
+
+async function _isHttpProxyReady(proxy: string): Promise<boolean> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), PROXY_READY_TIMEOUT_MS);
+  try {
+    const res = await fetch(HTTP_PROXY_CHECK_URL, {
+      signal: controller.signal,
+      proxy,
+    } as RequestInit & { proxy: string });
+    return res.status === 204 || res.ok;
+  } catch (err) {
+    _logger.debug({ err, proxy }, "http proxy readiness check failed");
+    return false;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+async function _runCurl(
+  args: string[],
+  timeoutMs: number,
+): Promise<{ exitCode: number; stdout: string }> {
+  const proc = Bun.spawn(["curl", ...args], {
+    stdout: "pipe",
+    stderr: "ignore",
+  });
+  const timer = setTimeout(() => proc.kill(), timeoutMs);
+  try {
+    const [stdout, exitCode] = await Promise.all([
+      new Response(proc.stdout).text(),
+      proc.exited,
+    ]);
+    return { exitCode, stdout };
+  } finally {
+    clearTimeout(timer);
   }
 }
 
