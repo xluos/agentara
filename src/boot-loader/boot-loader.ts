@@ -23,8 +23,28 @@ class BootLoader {
    * Bootstraps the application by verifying the integrity and then igniting the kernel.
    */
   public async bootstrap(): Promise<void> {
+    this._installProcessGuards();
     await this._verifyIntegrity();
     await this._igniteKernel();
+  }
+
+  /**
+   * Last-resort process guards. Without these, a single unhandled rejection
+   * or uncaught exception terminates this long-running service — e.g. one
+   * failed Feishu reply taking down the whole assistant. We log and stay
+   * alive; the real fix always belongs at the call site, but the service
+   * must not silently die.
+   */
+  private _installProcessGuards(): void {
+    process.on("unhandledRejection", (reason) => {
+      logger.error(
+        { err: reason },
+        "unhandled promise rejection (process kept alive)",
+      );
+    });
+    process.on("uncaughtException", (err) => {
+      logger.error({ err }, "uncaught exception (process kept alive)");
+    });
   }
 
   private async _verifyIntegrity(): Promise<void> {

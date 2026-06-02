@@ -51,6 +51,7 @@ import {
   isNewCommand,
   parseCommand,
   type CardCommandResult,
+  type DeferredCardCommandResult,
 } from "./commands";
 import { buildCommandCard } from "./commands/cards";
 import { GroupFlow } from "./group/group-flow";
@@ -206,7 +207,17 @@ class Kernel {
       this._feishuChannels.set(channel.id, feishuChannel);
       this._messageGateway.registerChannel(feishuChannel);
     }
-    this._messageGateway.on("message:inbound", this._handleInboundMessage);
+    // `.on` discards the listener's returned promise, so any rejection that
+    // escapes an async handler becomes an unhandled rejection (which crashes
+    // the process). Guard the handler we drive the most — inbound messages.
+    this._messageGateway.on("message:inbound", (message) => {
+      void this._handleInboundMessage(message).catch((err) =>
+        this._logger.error(
+          { err },
+          "unhandled error in inbound message handler",
+        ),
+      );
+    });
     this._messageGateway.on("message:recalled", this._handleMessageRecall);
     this._messageGateway.on("card:action", this._handleCardAction);
   }
@@ -542,6 +553,9 @@ class Kernel {
       });
       if (typeof result === "string") {
         replyText = result;
+      } else if (result.kind === "deferred_card") {
+        await this._handleDeferredCard(message, result, parsed.name);
+        return true;
       } else {
         replyText = result.fallback_text;
         replyCard = result;
@@ -561,6 +575,107 @@ class Kernel {
     );
     return true;
   };
+
+  /**
+   * Drive a {@link DeferredCardCommandResult}: post the pending card, run the
+   * slow work in the background, then patch the same message with the final
+   * card. Every step is guarded — a failure to render, run, or patch is
+   * logged but never allowed to escape (which would crash the process via an
+   * unhandled rejection on the fire-and-forget inbound handler).
+   */
+  private async _handleDeferredCard(
+    message: UserMessage,
+    result: DeferredCardCommandResult,
+    commandName: string,
+  ): Promise<void> {
+    const channel = message.channel_id
+      ? this._feishuChannels.get(message.channel_id)
+      : undefined;
+
+    // No card-capable channel: just run and reply with the final card/text.
+    if (!channel || !message.chat_id) {
+      try {
+        const finalCard = await result.run();
+        await this._replyTextOrCard(
+          message,
+          result.fallback_text,
+          finalCard,
+          commandName,
+        );
+      } catch (err) {
+        this._logger.error(
+          { err, command: commandName },
+          "deferred command failed",
+        );
+        await this._replyTextOrCard(
+          message,
+          `❌ 命令 \`/${commandName}\` 执行失败：${(err as Error).message}`,
+          undefined,
+          commandName,
+        );
+      }
+      return;
+    }
+
+    let cardMessageId: string;
+    try {
+      cardMessageId = await channel.sendRawCard(message.chat_id, result.initial, {
+        replyTo: message.id,
+        replyInThread: false,
+      });
+    } catch (err) {
+      // Couldn't show the pending card; still run the work and reply with the
+      // final result through the text-safe path so the user isn't left hanging.
+      this._logger.error(
+        { err, command: commandName, message_id: message.id },
+        "deferred initial card failed; falling back to text",
+      );
+      void result
+        .run()
+        .then((finalCard) =>
+          this._replyTextOrCard(
+            message,
+            result.fallback_text,
+            finalCard,
+            commandName,
+          ),
+        )
+        .catch((runErr) =>
+          this._logger.error(
+            { err: runErr, command: commandName },
+            "deferred run failed after initial card error",
+          ),
+        );
+      return;
+    }
+
+    // Fire-and-forget the slow work; fully guarded so it can never crash.
+    void (async () => {
+      try {
+        const finalCard = await result.run();
+        await channel.updateRawCard(cardMessageId, finalCard);
+      } catch (err) {
+        this._logger.error(
+          { err, command: commandName, card_message_id: cardMessageId },
+          "deferred command run failed",
+        );
+        try {
+          await channel.updateRawCard(
+            cardMessageId,
+            buildCommandCard({
+              title: "执行失败",
+              lines: [`❌ ${(err as Error).message}`],
+            }),
+          );
+        } catch (patchErr) {
+          this._logger.error(
+            { err: patchErr, card_message_id: cardMessageId },
+            "deferred failure card update failed",
+          );
+        }
+      }
+    })();
+  }
 
   private _handleStopCommand = async (message: UserMessage) => {
     const sessionId = message.session_id;
@@ -597,21 +712,16 @@ class Kernel {
     card?: Card,
     commandName?: string,
   ): Promise<void> {
-    if (
-      card &&
-      message.channel_id &&
-      message.chat_id &&
-      this._feishuChannels.get(message.channel_id)
-    ) {
+    const channel = message.channel_id
+      ? this._feishuChannels.get(message.channel_id)
+      : undefined;
+
+    if (card && message.chat_id && channel) {
       try {
-        await this._feishuChannels.get(message.channel_id)!.sendRawCard(
-          message.chat_id,
-          card,
-          {
-            replyTo: message.id,
-            replyInThread: false,
-          },
-        );
+        await channel.sendRawCard(message.chat_id, card, {
+          replyTo: message.id,
+          replyInThread: false,
+        });
         return;
       } catch (err) {
         this._logger.error(
@@ -626,19 +736,40 @@ class Kernel {
       }
     }
 
-    await this._messageGateway.replyMessage(
-      message.id,
-      {
-        role: "assistant",
-        session_id: message.session_id,
-        content: [{ type: "text", text }],
-      },
-      {
-        channelId: message.channel_id,
-        streaming: false,
-        replyInThread: false,
-      },
-    );
+    // Text fallback. This must never throw out of here: an unhandled
+    // rejection on the fire-and-forget inbound handler crashes the process.
+    try {
+      await this._messageGateway.replyMessage(
+        message.id,
+        {
+          role: "assistant",
+          session_id: message.session_id,
+          content: [{ type: "text", text }],
+        },
+        {
+          channelId: message.channel_id,
+          streaming: false,
+          replyInThread: false,
+        },
+      );
+    } catch (err) {
+      this._logger.error(
+        { err, command: commandName, message_id: message.id },
+        "text fallback reply failed; trying plain text",
+      );
+      // Last resort: a real plain-text message (not a card reply, which is
+      // what just failed) posted straight to the chat.
+      if (channel && message.chat_id) {
+        try {
+          await channel.sendPlainText(message.chat_id, text);
+        } catch (plainErr) {
+          this._logger.error(
+            { err: plainErr, message_id: message.id },
+            "plain-text fallback also failed; giving up",
+          );
+        }
+      }
+    }
   }
 
   private _handleMessageRecall = async (

@@ -41,7 +41,28 @@ export interface CardCommandResult {
   fallback_text: string;
 }
 
-export type CommandResult = string | CardCommandResult;
+/**
+ * Result for commands whose real work is slow (e.g. `/clone` running
+ * `git clone`). The kernel posts `initial` immediately as a "pending" card,
+ * then runs `run()` in the background and patches the SAME message with the
+ * returned card (pending → done/failed). Any error thrown by `run()` is
+ * caught by the kernel and rendered as a failure card, so a slow command can
+ * never crash the process or leave the user staring at a stuck card.
+ */
+export interface DeferredCardCommandResult {
+  kind: "deferred_card";
+  /** Card shown right away, before the slow work starts. */
+  initial: Card;
+  /** Plain-text fallback used when the channel cannot render cards. */
+  fallback_text: string;
+  /** Background work; resolves to the final card used to patch the message. */
+  run(): Promise<Card>;
+}
+
+export type CommandResult =
+  | string
+  | CardCommandResult
+  | DeferredCardCommandResult;
 
 /** A gateway-level command that bypasses the LLM entirely. */
 export interface CommandHandler {

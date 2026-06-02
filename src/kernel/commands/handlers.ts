@@ -405,27 +405,52 @@ const cloneHandler: CommandHandler = {
     if (existsSync(targetPath)) {
       return `❌ workspace 中已存在 \`${name}\`，请换个别名，或使用 \`/ls\` 查看已克隆的仓库。`;
     }
-    // If this URL matches a predefined repo in REPOS.md, route the
-    // clone through the shared object cache so the history is fetched
-    // at most once across all workspaces. Arbitrary URLs still do a
-    // plain clone — maintaining a cache entry for a one-off repo
-    // isn't worth the bookkeeping.
-    const catalogMatch = _findPredefinedByUrl(url);
-    const mirror = catalogMatch
-      ? await ensureCachedMirror(catalogMatch)
-      : null;
-    const cloneArgs = mirror
-      ? ["clone", "--reference", mirror, url, name]
-      : ["clone", url, name];
-    ctx.logger.info(
-      { chat_id: chatId, url, name, using_cache: Boolean(mirror) },
-      "cloning repo",
-    );
-    const result = await execGit(cloneArgs, workspacePath);
-    if (!result.ok) {
-      return `❌ \`git clone\` 失败：\n\`\`\`\n${result.stderr || result.stdout}\n\`\`\``;
-    }
-    return cardReply("克隆完成", [`✅ 已克隆 \`${name}\`.`]);
+    // `git clone` can take a while, so we don't block the inbound handler on
+    // it. Show a "cloning…" card immediately and finish the clone in the
+    // background; the kernel patches the same card to done/failed via
+    // `deferred_card`. Cheap validation above still replies synchronously.
+    return {
+      kind: "deferred_card",
+      initial: buildCommandCard({
+        title: "克隆中",
+        lines: [`⏳ 正在克隆 \`${name}\`…`],
+      }),
+      fallback_text: `正在克隆 ${name}…`,
+      async run() {
+        // If this URL matches a predefined repo in REPOS.md, route the
+        // clone through the shared object cache so the history is fetched
+        // at most once across all workspaces. Arbitrary URLs still do a
+        // plain clone — maintaining a cache entry for a one-off repo
+        // isn't worth the bookkeeping.
+        const catalogMatch = _findPredefinedByUrl(url);
+        const mirror = catalogMatch
+          ? await ensureCachedMirror(catalogMatch)
+          : null;
+        const cloneArgs = mirror
+          ? ["clone", "--reference", mirror, url, name]
+          : ["clone", url, name];
+        ctx.logger.info(
+          { chat_id: chatId, url, name, using_cache: Boolean(mirror) },
+          "cloning repo",
+        );
+        const result = await execGit(cloneArgs, workspacePath);
+        if (!result.ok) {
+          return buildCommandCard({
+            title: "克隆失败",
+            lines: [
+              `❌ \`git clone\` 失败：`,
+              "```",
+              result.stderr || result.stdout,
+              "```",
+            ],
+          });
+        }
+        return buildCommandCard({
+          title: "克隆完成",
+          lines: [`✅ 已克隆 \`${name}\`.`],
+        });
+      },
+    };
   },
 };
 
@@ -902,6 +927,16 @@ function _findPredefinedByUrl(
 
 function _normalizeGitUrl(url: string): string {
   let u = url.trim().toLowerCase();
+  // Drop the scheme (https://, http://, ssh://, git://) so the same repo
+  // reached over different protocols normalizes to the same key.
+  u = u.replace(/^[a-z][a-z0-9+.-]*:\/\//, "");
+  // Drop userinfo such as the "git@" in "git@host:group/repo".
+  u = u.replace(/^[^@/]+@/, "");
+  // scp-style "host:group/repo" -> "host/group/repo". The negative lookahead
+  // leaves a real "host:port" alone (port = digits followed by "/" or end).
+  u = u.replace(/^([^/:]+):(?!\d+(?:\/|$))/, "$1/");
+  // Drop an explicit port: "host:1234/path" -> "host/path".
+  u = u.replace(/^([^/:]+):\d+\//, "$1/");
   if (u.endsWith("/")) u = u.slice(0, -1);
   if (u.endsWith(".git")) u = u.slice(0, -4);
   return u;
