@@ -15,4 +15,31 @@ export const feishuThreads = sqliteTable("feishu_threads", {
   session_id: text("session_id").notNull(),
   /** Epoch milliseconds when the mapping was created. */
   created_at: integer("created_at").notNull(),
+  /**
+   * When 1, every message inside this thread triggers the bot without
+   * requiring an @-mention. When 0 (default), group-chat messages must
+   * still @-mention the bot even inside a thread the bot already
+   * participates in. Toggle via `/unmute` / `/mute` in the thread.
+   */
+  auto_respond: integer("auto_respond").notNull().default(0),
+});
+
+/**
+ * Groups the bot itself created via the `/group` command.
+ *
+ * Used by `/ungroup` to (a) authorize dismissal — only the original
+ * creator can tear down a group the bot made, and (b) look up groups by
+ * name when the command runs in P2P without a current-chat context.
+ */
+export const feishuBotGroups = sqliteTable("feishu_bot_groups", {
+  /** Feishu chat_id of the group created by the bot. */
+  chat_id: text("chat_id").primaryKey(),
+  /** Channel id that created the group (for multi-channel deployments). */
+  channel_id: text("channel_id").notNull(),
+  /** Display name given to the group at creation time. */
+  chat_name: text("chat_name").notNull(),
+  /** open_id of the user who ran `/group` — authoritative for dismissal. */
+  creator_open_id: text("creator_open_id").notNull(),
+  /** Epoch milliseconds when the group was created. */
+  created_at: integer("created_at").notNull(),
 });

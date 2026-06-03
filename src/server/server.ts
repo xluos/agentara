@@ -14,6 +14,7 @@ import {
   handoffRoutes,
   healthRoutes,
   memoryRoutes,
+  permissionRoutes,
   sessionRoutes,
   skillsRoutes,
   taskRoutes,
@@ -41,6 +42,10 @@ function createApp() {
       .route("/api/skills", skillsRoutes)
       .route("/api/tasks", taskRoutes)
       .route("/api/usage", usageRoutes)
+      // Internal-only route used by the Claude permission MCP subprocess.
+      // Auth is bearer-token against a rotating in-memory secret (see
+      // PermissionFlow.apiToken). Keep off `/api` so it doesn't get CORS.
+      .route("/internal/permission", permissionRoutes)
   );
 }
 

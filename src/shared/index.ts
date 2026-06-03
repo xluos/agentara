@@ -7,3 +7,4 @@ export * from "./sessioning";
 export * from "./skills";
 export * from "./tasking";
 export * from "./utils";
+export * from "./workspaces";

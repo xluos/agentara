@@ -4,6 +4,7 @@ import {
   containsThinking,
   containsToolUse,
   extractTextContent,
+  inlineMentions,
   isPureTextMessage,
 } from "@/shared";
 import type { Message } from "@/shared";
@@ -212,5 +213,37 @@ describe("extractTextContent", () => {
   test("returns empty string for system message", () => {
     const msg: Message = { ...base, role: "system", subtype: "info" };
     expect(extractTextContent(msg)).toBe("");
+  });
+});
+
+describe("inlineMentions", () => {
+  test("returns text unchanged when mentions list is empty or missing", () => {
+    expect(inlineMentions("hi @_user_0", [])).toBe("hi @_user_0");
+    expect(inlineMentions("hi @_user_0", undefined)).toBe("hi @_user_0");
+  });
+
+  test("replaces placeholders with @<name>", () => {
+    const result = inlineMentions(
+      "@_user_0 ping @_user_1 and @_user_0 again",
+      [
+        { key: "@_user_0", open_id: "ou_aaa", name: "Alice" },
+        { key: "@_user_1", open_id: "ou_bbb", name: "Bob" },
+      ],
+    );
+    expect(result).toBe("@Alice ping @Bob and @Alice again");
+  });
+
+  test("leaves placeholder as-is when name is missing", () => {
+    const result = inlineMentions("@_user_0 hi", [
+      { key: "@_user_0", open_id: "ou_aaa" },
+    ]);
+    expect(result).toBe("@_user_0 hi");
+  });
+
+  test("leaves placeholders unknown to the mentions array as-is", () => {
+    const result = inlineMentions("@_user_0 and @_user_9", [
+      { key: "@_user_0", open_id: "ou_aaa", name: "Alice" },
+    ]);
+    expect(result).toBe("@Alice and @_user_9");
   });
 });

@@ -12,9 +12,13 @@ export type {
   AppConfig,
   ChannelConfig,
   ChannelParams,
+  CodexConfig,
   MessagingConfig,
+  SettingConfig,
   TaskingConfig,
 } from "./schema";
+
+export { loadPredefinedRepos, PredefinedRepo } from "./predefined-repos";
 
 /**
  * Combined configuration interface including both YAML-loaded app config and paths.
@@ -87,6 +91,16 @@ export const config = {
       );
     }
     return _appConfig.messaging;
+  },
+  get setting() {
+    if (!_appConfig) {
+      // Fall back to the schema default ({ admin_open_ids: [] }) when the
+      // YAML hasn't been loaded yet (e.g. in early boot / unit tests). This
+      // keeps the gate permissive instead of throwing — the gate is a
+      // safety check, not load-bearing for boot.
+      return { admin_open_ids: [] as string[] };
+    }
+    return _appConfig.setting;
   },
   paths,
 };

@@ -16,3 +16,7 @@ up:
 
 down:
 	@bash scripts/down.sh
+
+restart:
+	@bash scripts/down.sh
+	@bash scripts/up.sh

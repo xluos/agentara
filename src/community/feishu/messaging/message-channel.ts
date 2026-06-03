@@ -12,14 +12,20 @@ import {
   createLogger,
   uuid,
   type AssistantMessage,
+  type CardActionPayload,
+  type CardFooterStats,
   type MessageChannel,
   type MessageChannelEventTypes,
   type UserMessage,
 } from "@/shared";
 
-import { feishuThreads } from "./data";
-import { renderMessageCard, splitMarkdownByTables } from "./message-renderer";
-import type { MessageReceiveEventData } from "./types";
+
+import { feishuBotGroups, feishuThreads } from "./data";
+import {
+  renderMessageCard,
+  splitMarkdownForCards,
+} from "./message-renderer";
+import type { Card, MessageReceiveEventData } from "./types";
 import { convertPostToMarkdown } from "./utils";
 
 function _isFeishuBadRequestError(err: unknown): boolean {
@@ -56,12 +62,62 @@ export class FeishuMessageChannel
   private _inboundClient: WSClient;
   private _client: Client;
   private _db: DrizzleDB;
+  /**
+   * Optional workspace resolver injected by the kernel. Given a Feishu
+   * `chat_id`, returns the absolute cwd of the workspace bound to that
+   * chat (or the default workspace when unbound). Used as the download
+   * root for user-uploaded files & quoted resources so each bound chat
+   * keeps its artifacts inside its own workspace instead of a global
+   * pool.
+   */
+  // eslint-disable-next-line no-unused-vars
+  private _resolveWorkspaceCwd?: (chatId: string | undefined) => string;
+  /**
+   * Optional session-cwd resolver injected by the kernel. Given a session id,
+   * returns the absolute cwd that session's agent ran in — the precise base
+   * for resolving outbound relative paths, since a single channel sends
+   * replies for many chats and `config.chatId` alone is not enough.
+   */
+  // eslint-disable-next-line no-unused-vars
+  private _resolveSessionCwd?: (sessionId: string) => string | undefined;
   private _failedCardUpdateMessages = new Set<string>();
+  /**
+   * Primary message ids for which we've already posted the final
+   * markdown-continuation cards. Kept so that a repeat `streaming: false`
+   * update doesn't double-post continuations.
+   */
+  private _finalizedPrimaries = new Set<string>();
+  /**
+   * Wall-clock start timestamps of in-flight streaming cards, keyed by
+   * primary message id. Set when the first streaming reply is created and
+   * consumed on the final (`streaming: false`) patch so we can render a
+   * "Done in Xs" note at the bottom of the finalized card.
+   */
+  private _cardStartedAt = new Map<string, number>();
   private _logger: Logger;
+  private _requireMention: boolean;
+  private _botOpenId?: string;
+
+  /**
+   * Bot's own open_id as resolved at `start()`. `undefined` until the channel
+   * has started, and when `require_mention` is disabled the bot-info fetch
+   * is skipped so this stays undefined even post-start.
+   */
+  get botOpenId(): string | undefined {
+    return this._botOpenId;
+  }
+  private _allowedUserOpenIds?: Set<string>;
+  private _allowedUserEmails?: string[];
 
   /**
    * Create a Feishu message channel.
-   * @param config - Feishu app credentials (defaults to env vars).
+   * @param config - Feishu app credentials, plus optional inbound filters:
+   *   - `requireMention`: when true, group-chat messages must @mention the bot.
+   *     The bot's own open_id is resolved at `start()` via `/bot/v3/info`. P2P
+   *     messages bypass the check — they are obviously directed at the bot.
+   *   - `allowedUserOpenIds` / `allowedUserEmails`: when either is non-empty,
+   *     the sender's open_id must be in the union of the two sets. Emails are
+   *     resolved to open_ids at `start()` via `/contact/v3/users/batch_get_id`.
    * @param db - Drizzle database instance for persisting thread-to-session mappings.
    */
   constructor(
@@ -70,6 +126,13 @@ export class FeishuMessageChannel
       chatId: string;
       appId: string;
       appSecret: string;
+      requireMention?: boolean;
+      allowedUserOpenIds?: string[];
+      allowedUserEmails?: string[];
+      // eslint-disable-next-line no-unused-vars
+      resolveWorkspaceCwd?: (chatId: string | undefined) => string;
+      // eslint-disable-next-line no-unused-vars
+      resolveSessionCwd?: (sessionId: string) => string | undefined;
     },
     db: DrizzleDB,
   ) {
@@ -80,6 +143,15 @@ export class FeishuMessageChannel
     }
     this._db = db;
     this._logger = createLogger("feishu-message-channel");
+    this._requireMention = !!config.requireMention;
+    this._resolveWorkspaceCwd = config.resolveWorkspaceCwd;
+    this._resolveSessionCwd = config.resolveSessionCwd;
+    if (config.allowedUserOpenIds && config.allowedUserOpenIds.length > 0) {
+      this._allowedUserOpenIds = new Set(config.allowedUserOpenIds);
+    }
+    if (config.allowedUserEmails && config.allowedUserEmails.length > 0) {
+      this._allowedUserEmails = config.allowedUserEmails;
+    }
     this._inboundClient = new WSClient({
       appId: this.config.appId,
       appSecret: this.config.appSecret,
@@ -92,104 +164,554 @@ export class FeishuMessageChannel
 
   /** Start listening for inbound messages via WebSocket. */
   async start() {
-    await this._inboundClient.start({
-      eventDispatcher: new EventDispatcher({}).register({
-        "im.message.receive_v1": this._handleMessageReceive,
-        "im.message.recalled_v1": this._handleMessageRecall,
-      }),
-    });
-  }
+    const needsToken = this._requireMention || !!this._allowedUserEmails;
+    const tenantToken = needsToken ? await this._fetchTenantAccessToken() : null;
 
-  /** Reply to a message in a Feishu chat thread. */
-  async replyMessage(
-    messageId: string,
-    message: Omit<AssistantMessage, "id">,
-    { streaming = true }: { streaming?: boolean } = {},
-  ): Promise<AssistantMessage> {
-    const { firstMessageContent, remainingChunks } = this._prepareMessageContent(
-      message.content,
-      streaming,
-    );
-
-    const card = await renderMessageCard(firstMessageContent, {
-      streaming,
-      uploadImage: this.uploadImage.bind(this),
-    });
-    if (!streaming) {
-      this._logOutboundMessage(message.session_id, message.content);
-    }
-    const { data: replyMessage } = await this._client.im.message.reply({
-      path: {
-        message_id: messageId,
-      },
-      data: {
-        msg_type: "interactive",
-        content: JSON.stringify(card),
-        reply_in_thread: true,
-      },
-    });
-    if (!replyMessage) {
-      throw new Error("Failed to reply message");
+    if (this._requireMention && tenantToken) {
+      this._botOpenId = await this._fetchBotOpenId(tenantToken);
+      this._logger.info(
+        { bot_open_id: this._botOpenId },
+        "resolved bot open_id for @mention filtering",
+      );
     }
 
-    const { thread_id: threadId } = replyMessage;
-    const sessionId = message.session_id;
-    this._mapThreadToSession(threadId!, sessionId);
-
-    await this._sendRemainingChunks(replyMessage.message_id!, remainingChunks);
-
-    const assistantMessage = message as AssistantMessage;
-    assistantMessage.id = replyMessage.message_id!;
-
-    if (!streaming) {
-      const lastText = message.content.filter((c) => c.type === "text").pop();
-      if (lastText?.type === "text") {
-        await this._sendLocalFileAttachments(
-          assistantMessage.id,
-          lastText.text,
+    if (this._allowedUserEmails && tenantToken) {
+      const resolved = await this._resolveEmailsToOpenIds(
+        this._allowedUserEmails,
+        tenantToken,
+      );
+      if (!this._allowedUserOpenIds) {
+        this._allowedUserOpenIds = new Set();
+      }
+      for (const openId of resolved.values()) {
+        this._allowedUserOpenIds.add(openId);
+      }
+      const unresolved = this._allowedUserEmails.filter(
+        (e) => !resolved.has(e),
+      );
+      this._logger.info(
+        {
+          resolved_count: resolved.size,
+          unresolved,
+          total_whitelist: this._allowedUserOpenIds.size,
+        },
+        "resolved email whitelist to open_ids",
+      );
+      if (unresolved.length > 0) {
+        this._logger.warn(
+          { unresolved },
+          "some whitelisted emails could not be resolved to an open_id",
         );
       }
     }
 
+    // The node-sdk's `IHandles` type doesn't include card-action events, but
+    // the underlying `EventDispatcher.invoke` dispatches by event-type string,
+    // and the WS gateway delivers `card.action.trigger` alongside regular
+    // events for self-built Feishu apps. We cast through `as never` to bypass
+    // the typing gap without loosening the strict lookup of typed handlers.
+    await this._inboundClient.start({
+      eventDispatcher: new EventDispatcher({}).register({
+        "im.message.receive_v1": this._handleMessageReceive,
+        "im.message.recalled_v1": this._handleMessageRecall,
+        ["card.action.trigger" as never]: this
+          ._handleCardAction as never,
+      }),
+    });
+  }
+
+  /**
+   * Send a raw Feishu interactive card to a chat. Escape hatch used by
+   * commands that render custom cards (e.g. `/setup`) outside the normal
+   * AssistantMessage pipeline. Returns the posted message's id so the caller
+   * can correlate later card actions / updates.
+   *
+   * `options.replyInThread` defaults to `false`: command-originated cards
+   * should appear inline in the chat rather than opening a new topic. Pass
+   * `true` explicitly if the flow is session-scoped.
+   */
+  async sendRawCard(
+    chatId: string,
+    card: Card,
+    options: { replyTo?: string; replyInThread?: boolean } = {},
+  ): Promise<string> {
+    if (options.replyTo) {
+      const { data } = await this._client.im.message.reply({
+        path: { message_id: options.replyTo },
+        data: {
+          msg_type: "interactive",
+          content: JSON.stringify(card),
+          reply_in_thread: options.replyInThread ?? false,
+        },
+      });
+      if (!data?.message_id) {
+        throw new Error("Failed to reply with interactive card");
+      }
+      return data.message_id;
+    }
+    const { data } = await this._client.im.message.create({
+      params: { receive_id_type: "chat_id" },
+      data: {
+        receive_id: chatId,
+        msg_type: "interactive",
+        content: JSON.stringify(card),
+      },
+    });
+    if (!data?.message_id) {
+      throw new Error("Failed to post interactive card");
+    }
+    return data.message_id;
+  }
+
+  /**
+   * Best-effort fetch of a chat's display name. The bot must be a member of
+   * the chat, with `im:chat` or `im:chat:readonly` scope. Returns undefined
+   * on any failure (permission denied, chat not found, network error) so
+   * callers can fall back to a deterministic default.
+   */
+  async getChatName(chatId: string): Promise<string | undefined> {
+    try {
+      const { data } = await this._client.im.chat.get({
+        path: { chat_id: chatId },
+      });
+      const name =
+        data?.i18n_names?.zh_cn ?? data?.name ?? data?.i18n_names?.en_us;
+      return typeof name === "string" && name.trim() ? name.trim() : undefined;
+    } catch (err) {
+      this._logger.warn({ err, chat_id: chatId }, "getChatName failed");
+      return undefined;
+    }
+  }
+
+  /**
+   * Replace the content of an existing interactive card message. Used by
+   * card-driven flows to transition the same message from "pending" to
+   * "completed" without spawning a new reply.
+   */
+  async updateRawCard(messageId: string, card: Card): Promise<void> {
+    await this._client.im.message.patch({
+      path: { message_id: messageId },
+      data: { content: JSON.stringify(card) },
+    });
+  }
+
+  /**
+   * Post a plain-text message into an arbitrary chat. Returns the posted
+   * message's id so callers can anchor follow-up replies (e.g. `/group`
+   * sends a welcome line then anchors its `/setup` card as a reply to it).
+   *
+   * Distinct from `postMessage(AssistantMessage)` which renders a card to
+   * this channel's default `config.chatId`.
+   */
+  async sendPlainText(chatId: string, text: string): Promise<string> {
+    const { data } = await this._client.im.message.create({
+      params: { receive_id_type: "chat_id" },
+      data: {
+        receive_id: chatId,
+        msg_type: "text",
+        content: JSON.stringify({ text }),
+      },
+    });
+    if (!data?.message_id) {
+      throw new Error("Failed to post plain text message");
+    }
+    return data.message_id;
+  }
+
+  /**
+   * Create a new group chat. The bot itself ends up as the initial owner;
+   * callers that want a human owner should follow up with
+   * {@link transferChatOwner}. `memberOpenIds` are added at creation time so
+   * no separate add-members round-trip is needed.
+   *
+   * Requires the `im:chat:create` scope.
+   */
+  async createChat(options: {
+    name: string;
+    memberOpenIds: string[];
+    description?: string;
+  }): Promise<string> {
+    const { data } = await this._client.im.chat.create({
+      params: { user_id_type: "open_id" },
+      data: {
+        name: options.name,
+        description: options.description,
+        chat_type: "private",
+        user_id_list: options.memberOpenIds,
+      },
+    });
+    if (!data?.chat_id) {
+      throw new Error("Feishu returned no chat_id when creating the chat");
+    }
+    return data.chat_id;
+  }
+
+  /**
+   * Transfer a group's owner to the specified user. The bot must currently
+   * be the owner. Requires the `im:chat.owner:update` scope.
+   */
+  async transferChatOwner(
+    chatId: string,
+    ownerOpenId: string,
+  ): Promise<void> {
+    await this._client.im.chat.update({
+      path: { chat_id: chatId },
+      params: { user_id_type: "open_id" },
+      data: { owner_id: ownerOpenId },
+    });
+  }
+
+  /**
+   * Dissolve a chat. Requires the bot to be the owner. Used by `/ungroup`
+   * to tear down groups the bot created earlier.
+   */
+  async dismissChat(chatId: string): Promise<void> {
+    await this._client.im.chat.delete({
+      path: { chat_id: chatId },
+    });
+  }
+
+  /**
+   * Look up a bot-created group by its chat_id. Returns undefined when the
+   * chat was not created by this bot (e.g. an existing group the bot was
+   * just added to).
+   */
+  findBotGroup(chatId: string):
+    | { chat_id: string; chat_name: string; creator_open_id: string }
+    | undefined {
+    const row = this._db
+      .select({
+        chat_id: feishuBotGroups.chat_id,
+        chat_name: feishuBotGroups.chat_name,
+        creator_open_id: feishuBotGroups.creator_open_id,
+      })
+      .from(feishuBotGroups)
+      .where(eq(feishuBotGroups.chat_id, chatId))
+      .get();
+    return row ?? undefined;
+  }
+
+  /**
+   * Find a bot-created group by either its display name or chat_id, scoped
+   * to a single creator. Used by `/ungroup <query>` from P2P so users can
+   * only dismiss groups they themselves created. Name match is exact
+   * (multiple groups may share a name; the caller must disambiguate).
+   */
+  findBotGroupForCreator(
+    query: string,
+    creatorOpenId: string,
+  ): Array<{ chat_id: string; chat_name: string }> {
+    return this._db
+      .select({
+        chat_id: feishuBotGroups.chat_id,
+        chat_name: feishuBotGroups.chat_name,
+      })
+      .from(feishuBotGroups)
+      .where(eq(feishuBotGroups.creator_open_id, creatorOpenId))
+      .all()
+      .filter((row) => row.chat_id === query || row.chat_name === query);
+  }
+
+  /** Remove a bot-group record. Call after a successful `dismissChat`. */
+  deleteBotGroupRecord(chatId: string): void {
+    this._db
+      .delete(feishuBotGroups)
+      .where(eq(feishuBotGroups.chat_id, chatId))
+      .run();
+  }
+
+  /**
+   * Add one or more users to the runtime whitelist and persist the change to
+   * `config.yaml`. Returns the open_ids that were actually new (not already
+   * in the set) so callers can report a precise count back to the user.
+   *
+   * Mutates the channel's in-memory set immediately — new entries take effect
+   * on the very next inbound message without a restart. Persistence keeps
+   * the change across restarts; we re-use Bun's YAML parser/stringifier so
+   * the file stays round-trippable.
+   *
+   * `senderOpenId` is required so we can auto-seed the operator into the
+   * whitelist when transitioning from the implicit "everyone allowed" state
+   * (no whitelist configured) to an explicit list. Without this seed, a
+   * freshly-initialized whitelist would exclude the very user who just ran
+   * `/allow`, locking them out of their own bot on the next message.
+   */
+  async addToWhitelist(
+    openIds: string[],
+    senderOpenId: string,
+  ): Promise<string[]> {
+    const hadWhitelist = !!this._allowedUserOpenIds;
+    if (!this._allowedUserOpenIds) {
+      this._allowedUserOpenIds = new Set<string>();
+    }
+    const added: string[] = [];
+    // Bootstrap guard: the previous state allowed everyone implicitly.
+    // Preserve access for the operator when we materialize that into an
+    // explicit list.
+    if (!hadWhitelist && !this._allowedUserOpenIds.has(senderOpenId)) {
+      this._allowedUserOpenIds.add(senderOpenId);
+      added.push(senderOpenId);
+    }
+    for (const openId of openIds) {
+      if (!this._allowedUserOpenIds.has(openId)) {
+        this._allowedUserOpenIds.add(openId);
+        added.push(openId);
+      }
+    }
+    if (added.length === 0) return added;
+    try {
+      await this._persistWhitelistToConfig();
+    } catch (err) {
+      this._logger.error(
+        { err, channel_id: this.id, added },
+        "failed to persist whitelist addition; in-memory set was still updated",
+      );
+      throw err;
+    }
+    return added;
+  }
+
+  private async _persistWhitelistToConfig(): Promise<void> {
+    const fs = await import("node:fs/promises");
+    const path = await import("node:path");
+    const { config: cfgModule } = await import("@/shared");
+    const configPath = path.join(cfgModule.paths.home, "config.yaml");
+    const raw = await fs.readFile(configPath, "utf-8");
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Bun.YAML types are not in @types yet
+    const parsed = (Bun as any).YAML.parse(raw) as {
+      messaging?: {
+        channels?: Array<{
+          id: string;
+          params?: Record<string, unknown>;
+        }>;
+      };
+    };
+    const channel = parsed.messaging?.channels?.find((c) => c.id === this.id);
+    if (!channel) {
+      throw new Error(
+        `channel \`${this.id}\` not found in config.yaml — whitelist write aborted`,
+      );
+    }
+    if (!channel.params) channel.params = {};
+    channel.params.allowed_user_ids = Array.from(
+      this._allowedUserOpenIds ?? [],
+    );
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any -- Bun.YAML types are not in @types yet
+    const serialized = (Bun as any).YAML.stringify(parsed);
+    await fs.writeFile(configPath, serialized, "utf-8");
+  }
+
+  /**
+   * Exchange app credentials for a tenant access token. Used for REST calls
+   * that the node-sdk doesn't expose directly (bot info, email→id lookup).
+   */
+  private async _fetchTenantAccessToken(): Promise<string> {
+    const res = await fetch(
+      "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json; charset=utf-8" },
+        body: JSON.stringify({
+          app_id: this.config.appId,
+          app_secret: this.config.appSecret,
+        }),
+      },
+    );
+    const json = (await res.json()) as {
+      code: number;
+      msg: string;
+      tenant_access_token?: string;
+    };
+    if (json.code !== 0 || !json.tenant_access_token) {
+      throw new Error(
+        `Failed to obtain tenant_access_token: ${json.code} ${json.msg}`,
+      );
+    }
+    return json.tenant_access_token;
+  }
+
+  /**
+   * Fetch the bot's own open_id via `/bot/v3/info`. Requires the bot app to
+   * have "Get bot info" permission. Throws on failure — we'd rather fail loud
+   * than silently accept every message when the user asked for mention-only.
+   */
+  private async _fetchBotOpenId(tenantToken: string): Promise<string> {
+    const res = await fetch("https://open.feishu.cn/open-apis/bot/v3/info", {
+      method: "GET",
+      headers: { Authorization: `Bearer ${tenantToken}` },
+    });
+    const json = (await res.json()) as {
+      code: number;
+      msg: string;
+      bot?: { open_id?: string };
+    };
+    if (json.code !== 0 || !json.bot?.open_id) {
+      throw new Error(`Failed to fetch bot info: ${json.code} ${json.msg}`);
+    }
+    return json.bot.open_id;
+  }
+
+  /**
+   * Resolve emails to open_ids via `/contact/v3/users/batch_get_id`. Requires
+   * the bot app to have "Get user ID by mobile/email" permission. Emails that
+   * don't map to a user are omitted from the returned map (the caller logs
+   * unresolved entries). Batches of 50 per the API limit.
+   */
+  private async _resolveEmailsToOpenIds(
+    emails: string[],
+    tenantToken: string,
+  ): Promise<Map<string, string>> {
+    const result = new Map<string, string>();
+    for (let i = 0; i < emails.length; i += 50) {
+      const batch = emails.slice(i, i + 50);
+      const res = await fetch(
+        "https://open.feishu.cn/open-apis/contact/v3/users/batch_get_id?user_id_type=open_id",
+        {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${tenantToken}`,
+            "Content-Type": "application/json; charset=utf-8",
+          },
+          body: JSON.stringify({ emails: batch, mobiles: [] }),
+        },
+      );
+      const json = (await res.json()) as {
+        code: number;
+        msg: string;
+        data?: {
+          user_list?: Array<{ email?: string; user_id?: string }>;
+        };
+      };
+      if (json.code !== 0) {
+        throw new Error(
+          `Failed to resolve emails (${batch.length}): ${json.code} ${json.msg}`,
+        );
+      }
+      for (const entry of json.data?.user_list ?? []) {
+        if (entry.email && entry.user_id) {
+          result.set(entry.email, entry.user_id);
+        }
+      }
+    }
+    return result;
+  }
+
+  /**
+   * Reply to a message. Defaults to opening a new Feishu topic
+   * (`reply_in_thread: true`) because most replies are session-scoped
+   * assistant output. Pass `replyInThread: false` for one-shot replies (slash
+   * commands, quick error messages) that should render inline instead.
+   *
+   * When `replyInThread` is false, the thread→session mapping is skipped —
+   * there's no new thread to map, and the reply doesn't belong to any
+   * session anyway.
+   */
+  async replyMessage(
+    messageId: string,
+    message: Omit<AssistantMessage, "id">,
+    {
+      streaming = true,
+      replyInThread = true,
+    }: { streaming?: boolean; replyInThread?: boolean } = {},
+  ): Promise<AssistantMessage> {
+    const { primaryContent, markdownContinuations } =
+      this._prepareCardPayload(message.content, streaming);
+    if (!streaming) {
+      this._logOutboundMessage(message.session_id, message.content);
+    }
+
+    const baseDir = this._resolveWorkspaceBaseDir(message.session_id);
+    const primaryCard = await renderMessageCard(primaryContent, {
+      streaming,
+      uploadImage: (p) => this.uploadImage(p, baseDir),
+    });
+    const { data: replyMessage } = await this._client.im.message.reply({
+      path: { message_id: messageId },
+      data: {
+        msg_type: "interactive",
+        content: JSON.stringify(primaryCard),
+        reply_in_thread: replyInThread,
+      },
+    });
+    if (!replyMessage?.message_id) {
+      throw new Error("Failed to reply message");
+    }
+    const primaryId = replyMessage.message_id;
+
+    if (replyInThread && replyMessage.thread_id) {
+      this._mapThreadToSession(replyMessage.thread_id, message.session_id);
+    }
+
+    if (streaming) {
+      this._cardStartedAt.set(primaryId, Date.now());
+    }
+
+    if (!streaming && markdownContinuations.length > 0) {
+      await this._postMarkdownContinuations(
+        primaryId,
+        markdownContinuations,
+        replyInThread,
+        message.session_id,
+      );
+      this._finalizedPrimaries.add(primaryId);
+    }
+
+    const assistantMessage = message as AssistantMessage;
+    assistantMessage.id = primaryId;
+
+    if (!streaming) {
+      await this._sendFileAttachmentsForFinalText(
+        assistantMessage.id,
+        message.content,
+        message.session_id,
+      );
+    }
     return assistantMessage;
   }
 
   async postMessage(
     message: Omit<AssistantMessage, "id">,
   ): Promise<AssistantMessage> {
-    const { firstMessageContent, remainingChunks } = this._prepareMessageContent(
-      message.content,
-      false,
-    );
-
-    const card = await renderMessageCard(firstMessageContent, {
-      streaming: false,
-      uploadImage: this.uploadImage.bind(this),
-    });
+    const { primaryContent, markdownContinuations } =
+      this._prepareCardPayload(message.content, false);
     this._logOutboundMessage(message.session_id, message.content);
+
+    const baseDir = this._resolveWorkspaceBaseDir(message.session_id);
+    const primaryCard = await renderMessageCard(primaryContent, {
+      streaming: false,
+      uploadImage: (p) => this.uploadImage(p, baseDir),
+    });
     const { data } = await this._client.im.message.create({
-      params: {
-        receive_id_type: "chat_id",
-      },
+      params: { receive_id_type: "chat_id" },
       data: {
         receive_id: this.config.chatId,
         msg_type: "interactive",
-        content: JSON.stringify(card),
+        content: JSON.stringify(primaryCard),
       },
     });
-    if (!data) {
+    if (!data?.message_id) {
       throw new Error("Failed to post message");
     }
-    const { message_id: messageId } = data;
-    const assistantMessage = message as AssistantMessage;
-    assistantMessage.id = messageId!;
+    const primaryId = data.message_id;
 
-    await this._sendRemainingChunks(assistantMessage.id, remainingChunks);
-
-    const lastText = message.content.filter((c) => c.type === "text").pop();
-    if (lastText?.type === "text") {
-      await this._sendLocalFileAttachments(assistantMessage.id, lastText.text);
+    if (markdownContinuations.length > 0) {
+      await this._postMarkdownContinuations(
+        primaryId,
+        markdownContinuations,
+        /* replyInThread */ true,
+        message.session_id,
+      );
     }
+    this._finalizedPrimaries.add(primaryId);
+
+    const assistantMessage = message as AssistantMessage;
+    assistantMessage.id = primaryId;
+
+    await this._sendFileAttachmentsForFinalText(
+      assistantMessage.id,
+      message.content,
+      message.session_id,
+    );
 
     const emojis = [
       "思考中",
@@ -200,9 +722,7 @@ export class FeishuMessageChannel
       "挥手",
     ];
     const { data: replyData } = await this._client.im.message.reply({
-      path: {
-        message_id: assistantMessage.id,
-      },
+      path: { message_id: assistantMessage.id },
       data: {
         content: JSON.stringify({
           type: "text",
@@ -212,10 +732,8 @@ export class FeishuMessageChannel
         reply_in_thread: true,
       },
     });
-    if (replyData) {
-      const { thread_id: threadId } = replyData;
-      const sessionId = message.session_id;
-      this._mapThreadToSession(threadId!, sessionId);
+    if (replyData?.thread_id) {
+      this._mapThreadToSession(replyData.thread_id, message.session_id);
     }
     return assistantMessage;
   }
@@ -223,32 +741,37 @@ export class FeishuMessageChannel
   /** Update the content of an existing Feishu message. */
   async updateMessageContent(
     message: AssistantMessage,
-    { streaming = true }: { streaming?: boolean } = {},
+    {
+      streaming = true,
+      footer,
+    }: { streaming?: boolean; footer?: CardFooterStats } = {},
   ): Promise<void> {
     if (this._failedCardUpdateMessages.has(message.id)) {
       return;
     }
 
-    const { firstMessageContent, remainingChunks } = this._prepareMessageContent(
-      message.content,
-      streaming,
-    );
-
-    const card = await renderMessageCard(firstMessageContent, {
-      streaming,
-      uploadImage: this.uploadImage.bind(this),
-    });
+    const { primaryContent, markdownContinuations } =
+      this._prepareCardPayload(message.content, streaming);
     if (!streaming) {
       this._logOutboundMessage(message.session_id, message.content);
     }
+
+    const startedAt = this._cardStartedAt.get(message.id);
+    const elapsedMs =
+      !streaming && typeof startedAt === "number"
+        ? Date.now() - startedAt
+        : undefined;
+    const baseDir = this._resolveWorkspaceBaseDir(message.session_id);
+    const card = await renderMessageCard(primaryContent, {
+      streaming,
+      uploadImage: (p) => this.uploadImage(p, baseDir),
+      elapsedMs,
+      footer,
+    });
     try {
       await this._client.im.message.patch({
-        path: {
-          message_id: message.id,
-        },
-        data: {
-          content: JSON.stringify(card),
-        },
+        path: { message_id: message.id },
+        data: { content: JSON.stringify(card) },
       });
     } catch (err) {
       if (_isFeishuBadRequestError(err)) {
@@ -262,24 +785,70 @@ export class FeishuMessageChannel
       }
       throw err;
     }
-
-    await this._sendRemainingChunks(message.id, remainingChunks);
-
     if (!streaming) {
-      const lastText = message.content.filter((c) => c.type === "text").pop();
-      if (lastText?.type === "text") {
-        await this._sendLocalFileAttachments(message.id, lastText.text);
-      }
+      this._cardStartedAt.delete(message.id);
     }
+
+    // Markdown continuations are only meaningful once the run is final —
+    // during streaming the "final text" hasn't stabilized yet. Post them
+    // exactly once per primary message.
+    if (
+      !streaming &&
+      markdownContinuations.length > 0 &&
+      !this._finalizedPrimaries.has(message.id)
+    ) {
+      await this._postMarkdownContinuations(
+        message.id,
+        markdownContinuations,
+        /* replyInThread */ true,
+        message.session_id,
+      );
+    }
+    if (!streaming) {
+      this._finalizedPrimaries.add(message.id);
+      await this._sendFileAttachmentsForFinalText(
+        message.id,
+        message.content,
+        message.session_id,
+      );
+    }
+  }
+
+  /**
+   * Base directory for resolving agent-generated relative paths (markdown
+   * image/file links). The agent ran with its cwd set to the session's
+   * workspace, so its relative paths are relative to *that* directory — not
+   * the global `$AGENTARA_HOME`, and not necessarily `this.config.chatId`'s
+   * workspace (a single channel serves replies for many chats).
+   *
+   * Resolution order:
+   * 1. The owning session's recorded cwd (most precise — it's exactly where
+   *    the agent wrote the file).
+   * 2. The channel's configured chat workspace (legacy fallback).
+   * 3. Agentara home (tests / unwired callers).
+   *
+   * @param sessionId - Session that produced the outbound message, when known.
+   */
+  private _resolveWorkspaceBaseDir(sessionId?: string): string {
+    return (
+      (sessionId ? this._resolveSessionCwd?.(sessionId) : undefined) ??
+      this._resolveWorkspaceCwd?.(this.config.chatId) ??
+      config.paths.home
+    );
   }
 
   /**
    * Uploads an image to Feishu. Returns the key of the uploaded image.
    * @param path - The path to the image to upload.
+   * @param baseDir - Directory to resolve a relative `path` against. Defaults
+   *   to the channel's configured-chat workspace; callers that know the
+   *   owning session should pass that session's cwd.
    * @returns The key of the uploaded image.
    */
-  async uploadImage(path: string): Promise<string> {
-    const absPath = nodePath.join(config.paths.home, path);
+  async uploadImage(path: string, baseDir?: string): Promise<string> {
+    const absPath = nodePath.isAbsolute(path)
+      ? path
+      : nodePath.join(baseDir ?? this._resolveWorkspaceBaseDir(), path);
     const file = fs.readFileSync(absPath);
     this._logger.info(`Uploading image ${absPath}`);
     const res = await this._client.im.v1.image.create({
@@ -300,11 +869,17 @@ export class FeishuMessageChannel
 
   /**
    * Uploads a file to Feishu. Returns the key of the uploaded file.
-   * @param filePath - The path to the file relative to the home directory.
+   * @param filePath - Absolute path, or a path relative to `baseDir`
+   *   (agent-generated markdown links).
+   * @param baseDir - Directory to resolve a relative `filePath` against.
+   *   Defaults to the channel's configured-chat workspace; callers that know
+   *   the owning session should pass that session's cwd.
    * @returns The key of the uploaded file.
    */
-  async uploadFile(filePath: string): Promise<string> {
-    const absPath = nodePath.join(config.paths.home, filePath);
+  async uploadFile(filePath: string, baseDir?: string): Promise<string> {
+    const absPath = nodePath.isAbsolute(filePath)
+      ? filePath
+      : nodePath.join(baseDir ?? this._resolveWorkspaceBaseDir(), filePath);
     const file = fs.createReadStream(absPath);
     const fileName = nodePath.basename(absPath);
     const ext = nodePath.extname(absPath).slice(1).toLowerCase();
@@ -345,14 +920,20 @@ export class FeishuMessageChannel
    * Downloads an image or a file from a message.
    * @param messageId - The ID of the message to download the resource from.
    * @param file_key - The key of the file to download.
-   * @param file_name - The name of the file to download. If not provided, the file name will be inferred from the file key.
-   * @returns The path to the downloaded file.
+   * @param options.file_name - Optional file name; inferred from metadata
+   *   when omitted.
+   * @param options.targetDir - Absolute root directory for the download.
+   *   Defaults to the global `$AGENTARA_HOME/workspace/uploads` when
+   *   unspecified. Channel callers pass the per-chat workspace cwd so
+   *   uploads land inside the workspace that triggered them.
+   * @returns Absolute path to the downloaded file.
    */
   async downloadMessageResource(
     messageId: string,
     file_key: string,
-    file_name?: string,
+    options?: { file_name?: string; targetDir?: string },
   ): Promise<string> {
+    const { file_name, targetDir } = options ?? {};
     const { writeFile, headers } = await this._client.im.v1.messageResource.get(
       {
         path: {
@@ -371,7 +952,10 @@ export class FeishuMessageChannel
       Mime: string;
     };
     const isImage = metadata.Mime.startsWith("image/");
-    let dir = config.paths.uploads;
+    const root = targetDir
+      ? nodePath.join(targetDir, "uploads")
+      : config.paths.uploads;
+    let dir = root;
     if (isImage) {
       dir = nodePath.join(dir, "images");
     }
@@ -401,82 +985,113 @@ export class FeishuMessageChannel
       filename += `-${i}`;
     }
     filename += extname;
-    await writeFile(nodePath.join(dir, filename));
-    return nodePath.relative(config.paths.home, nodePath.join(dir, filename));
+    const absPath = nodePath.join(dir, filename);
+    await writeFile(absPath);
+    // Return an absolute path. Claude Code's cwd is the per-group
+    // workspace dir (`$AGENTARA_HOME/workspaces/<id>/`), not
+    // `$AGENTARA_HOME`, so a path relative to HOME would fail to
+    // resolve inside the agent's read tools.
+    return absPath;
   }
 
   /**
-   * Prepare message content for sending, splitting if necessary due to table limits.
-   * @param content - Original message content.
-   * @param streaming - Whether the message is being streamed (skip splitting if true).
-   * @returns First chunk content and remaining chunks to send as follow-ups.
+   * Split an assistant message's final text (if any) into the part that
+   * fits on the primary card plus a list of overflow markdown strings
+   * that will each become a text-only continuation card.
+   *
+   * Tool steps never spill — the renderer truncates the step panel to a
+   * windowed view when there are too many. Only the final answer gets
+   * spilled, and only when it's either table-dense (Feishu caps tables
+   * per card) or byte-heavy (Feishu caps card body size). During
+   * streaming we skip the spill entirely: the "final text" hasn't
+   * stabilized and any interim text is ephemeral.
    */
-  private _prepareMessageContent(
+  private _prepareCardPayload(
     content: AssistantMessage["content"],
     streaming: boolean,
   ): {
-    firstMessageContent: AssistantMessage["content"];
-    remainingChunks: string[];
+    primaryContent: AssistantMessage["content"];
+    markdownContinuations: string[];
   } {
-    const lastTextContent = content.findLast((c) => c.type === "text");
-    const markdownChunks = lastTextContent
-      ? splitMarkdownByTables(lastTextContent.text)
-      : [];
-    const needsSplit = !streaming && markdownChunks.length > 1;
-
-    const firstMessageContent = needsSplit
-      ? (content.map((c) =>
-          c.type === "text" ? { ...c, text: markdownChunks[0] } : c,
-        ) as AssistantMessage["content"])
-      : content;
-
-    const remainingChunks = needsSplit ? markdownChunks.slice(1) : [];
-
-    return { firstMessageContent, remainingChunks };
+    if (streaming) {
+      return { primaryContent: content, markdownContinuations: [] };
+    }
+    const lastTextIdx = content.findLastIndex((c) => c.type === "text");
+    if (lastTextIdx === -1) {
+      return { primaryContent: content, markdownContinuations: [] };
+    }
+    const lastText = content[lastTextIdx]!;
+    if (lastText.type !== "text") {
+      return { primaryContent: content, markdownContinuations: [] };
+    }
+    const markdownChunks = splitMarkdownForCards(lastText.text);
+    if (markdownChunks.length <= 1) {
+      return { primaryContent: content, markdownContinuations: [] };
+    }
+    const rewritten = [...content];
+    rewritten[lastTextIdx] = { ...lastText, text: markdownChunks[0]! };
+    return {
+      primaryContent: rewritten as AssistantMessage["content"],
+      markdownContinuations: markdownChunks.slice(1),
+    };
   }
 
   /**
-   * Send remaining markdown chunks as follow-up reply messages.
-   * @param messageId - The message ID to reply to.
-   * @param chunks - Array of markdown strings to send.
+   * Post the overflow markdown chunks as text-only reply cards
+   * underneath the primary. Called at most once per primary, at the
+   * moment we finalize the message.
    */
-  private async _sendRemainingChunks(
-    messageId: string,
-    chunks: string[],
+  private async _postMarkdownContinuations(
+    primaryId: string,
+    markdownChunks: string[],
+    replyInThread: boolean,
+    sessionId?: string,
   ): Promise<void> {
-    for (const chunkText of chunks) {
-      const chunkCard = await renderMessageCard(
-        [{ type: "text", text: chunkText }],
-        {
-          streaming: false,
-          uploadImage: this.uploadImage.bind(this),
-        },
-      );
+    const baseDir = this._resolveWorkspaceBaseDir(sessionId);
+    for (const text of markdownChunks) {
+      const card = await renderMessageCard([{ type: "text", text }], {
+        streaming: false,
+        uploadImage: (p) => this.uploadImage(p, baseDir),
+      });
       await this._client.im.message.reply({
-        path: {
-          message_id: messageId,
-        },
+        path: { message_id: primaryId },
         data: {
           msg_type: "interactive",
-          content: JSON.stringify(chunkCard),
-          reply_in_thread: true,
+          content: JSON.stringify(card),
+          reply_in_thread: replyInThread,
         },
       });
     }
   }
 
-  /** Extract local file paths from markdown link syntax [text](path) in text. */
-  private _extractLocalFilePaths(text: string): string[] {
+  /** Send file attachments referenced in the final text block, if any. */
+  private async _sendFileAttachmentsForFinalText(
+    messageId: string,
+    content: AssistantMessage["content"],
+    sessionId?: string,
+  ): Promise<void> {
+    const lastText = content.filter((c) => c.type === "text").pop();
+    if (lastText?.type === "text") {
+      await this._sendLocalFileAttachments(messageId, lastText.text, sessionId);
+    }
+  }
+
+  /**
+   * Extract local file paths from markdown link syntax [text](path) in text.
+   * Relative paths are resolved against the owning session's workspace cwd.
+   */
+  private _extractLocalFilePaths(text: string, sessionId?: string): string[] {
     const linkRegex = /(?<!!)\[.*?\]\(([^)]+)\)/g;
+    const baseDir = this._resolveWorkspaceBaseDir(sessionId);
     const paths: string[] = [];
     let match: RegExpExecArray | null;
     while ((match = linkRegex.exec(text)) !== null) {
       const filePath = match[1];
-      if (
-        filePath &&
-        !filePath.includes("://") &&
-        fs.existsSync(nodePath.join(config.paths.home, filePath))
-      ) {
+      if (!filePath || filePath.includes("://")) continue;
+      const absPath = nodePath.isAbsolute(filePath)
+        ? filePath
+        : nodePath.join(baseDir, filePath);
+      if (fs.existsSync(absPath)) {
         paths.push(filePath);
       }
     }
@@ -487,14 +1102,16 @@ export class FeishuMessageChannel
   private async _sendLocalFileAttachments(
     messageId: string,
     text: string,
+    sessionId?: string,
   ): Promise<void> {
-    const filePaths = this._extractLocalFilePaths(text);
+    const filePaths = this._extractLocalFilePaths(text, sessionId);
+    const baseDir = this._resolveWorkspaceBaseDir(sessionId);
     const seen = new Set<string>();
     for (const filePath of filePaths) {
       if (seen.has(filePath)) continue;
       seen.add(filePath);
       try {
-        const fileKey = await this.uploadFile(filePath);
+        const fileKey = await this.uploadFile(filePath, baseDir);
         await this._client.im.message.reply({
           path: { message_id: messageId },
           data: {
@@ -510,6 +1127,37 @@ export class FeishuMessageChannel
           `Failed to send file attachment: ${filePath}`,
         );
       }
+    }
+  }
+
+  /**
+   * Post a short plain-text reply when an inbound message is dropped by a
+   * gate (whitelist / mention enforcement). Only used for messages whose
+   * intent is clearly directed at the bot — otherwise the bot would spam
+   * rejection replies at every unrelated group message.
+   */
+  private async _replyRejection(
+    messageId: string,
+    reason: "whitelist" | "mention",
+  ): Promise<void> {
+    const text =
+      reason === "whitelist"
+        ? "❌ 未授权：你不在本机器人白名单。请让已授权的成员用 `/allow @你` 把你加入。"
+        : "❌ 本群需要 @ 机器人才能触发对话（`/` 斜杠命令除外）。";
+    try {
+      await this._client.im.message.reply({
+        path: { message_id: messageId },
+        data: {
+          msg_type: "text",
+          content: JSON.stringify({ text }),
+          reply_in_thread: false,
+        },
+      });
+    } catch (err) {
+      this._logger.warn(
+        { err, message_id: messageId, reason },
+        "failed to send rejection reply",
+      );
     }
   }
 
@@ -544,22 +1192,164 @@ export class FeishuMessageChannel
     this._logger.info([sessionId, finalText], "Final Feishu outbound content");
   }
 
-  private _handleMessageReceive = async ({
-    message: receivedMessage,
-  }: MessageReceiveEventData) => {
-    const { message_id: messageId, thread_id: threadId } = receivedMessage;
-    const session_id = this._resolveSessionId(threadId);
+  private _handleMessageReceive = async (
+    eventData: MessageReceiveEventData,
+  ) => {
+    const { sender, message: receivedMessage } = eventData;
+    const {
+      message_id: messageId,
+      thread_id: threadId,
+      chat_id: chatId,
+      chat_type: chatType,
+      message_type: messageType,
+      parent_id: parentId,
+      mentions,
+    } = receivedMessage;
+    const senderOpenId = sender?.sender_id?.open_id;
+
+    const isAllowedSender =
+      !this._allowedUserOpenIds ||
+      (senderOpenId != null && this._allowedUserOpenIds.has(senderOpenId));
+
+    // Slash commands (e.g. `/setup`, `/bind`) intentionally bypass the
+    // @-mention requirement — operators should be able to run them with a
+    // single keystroke in the chat bar. The sender whitelist still applies.
+    const isSlashCommand = _peekSlashCommand(
+      messageType,
+      receivedMessage.content,
+    );
+    // Messages inside a thread the bot has already engaged in still require
+    // an @-mention by default — otherwise casual in-thread chatter between
+    // humans would make the bot reply to every line. Operators can flip the
+    // thread into "auto-respond" mode via `/unmute`, which is what this flag
+    // reflects. `/mute` restores the default.
+    const isThreadAutoRespond = this._isThreadAutoRespond(threadId);
+    const mentionEnforced =
+      this._requireMention &&
+      chatType === "group" &&
+      !isSlashCommand &&
+      !isThreadAutoRespond;
+    const isBotMentioned =
+      !!this._botOpenId &&
+      !!mentions?.some((m) => m.id?.open_id === this._botOpenId);
+    const mentionOk = !mentionEnforced || isBotMentioned;
+
+    this._logger.info(
+      {
+        message_id: messageId,
+        chat_id: chatId,
+        chat_type: chatType,
+        message_type: messageType,
+        sender_open_id: senderOpenId,
+        bot_mentioned: isBotMentioned,
+        slash_command: isSlashCommand,
+        thread_auto_respond: isThreadAutoRespond,
+        passed: isAllowedSender && mentionOk,
+      },
+      "inbound message",
+    );
+
+    // A message is "directed at the bot" if the intent is unambiguous —
+    // slash command, explicit @-mention, inside an auto-respond thread, or
+    // a p2p chat. We only surface rejection replies for these; casual
+    // non-whitelisted chatter inside a muted bot-thread is silently dropped
+    // so the bot doesn't interrupt human side-discussions.
+    const isIntendedForBot =
+      isSlashCommand ||
+      isBotMentioned ||
+      isThreadAutoRespond ||
+      chatType === "p2p";
+
+    if (!isAllowedSender) {
+      this._logger.info(
+        { message_id: messageId, sender_open_id: senderOpenId },
+        "dropping inbound: sender not in whitelist",
+      );
+      if (isIntendedForBot) {
+        await this._replyRejection(messageId, "whitelist");
+      }
+      return;
+    }
+    if (!mentionOk) {
+      this._logger.info(
+        { message_id: messageId, chat_id: chatId },
+        "dropping inbound: bot not @mentioned in group chat",
+      );
+      // `mentionEnforced` already excludes slash_command / in_bot_thread, so
+      // reaching here means the message has no directed signal. Stay silent.
+      return;
+    }
+
+    const session_id = this._resolveSessionId(chatId, threadId);
+    // Normalize Feishu's chat_type into the shared enum so command handlers
+    // can gate on group-vs-P2P without reaching back into provider details.
+    // Feishu emits `"p2p"` (not `"single"`) for 1:1 chats — accept both to be
+    // robust against SDK version drift.
+    const normalizedChatType: "group" | "single" | undefined =
+      chatType === "group"
+        ? "group"
+        : chatType === "p2p" || chatType === "single"
+          ? "single"
+          : undefined;
+    // Propagate the raw Feishu mentions into a provider-agnostic list so
+    // downstream command handlers (`/group`, `/allow`) can resolve the
+    // `@_user_N` placeholders that appear in the text content.
+    const normalizedMentions: Array<{
+      key: string;
+      open_id: string;
+      name?: string;
+    }> = [];
+    for (const m of mentions ?? []) {
+      const openId = m.id?.open_id;
+      if (!openId || !m.key) continue;
+      normalizedMentions.push({
+        key: m.key,
+        open_id: openId,
+        name: m.name,
+      });
+    }
+    // Per-chat download root so files land inside the workspace that
+    // actually triggered them. Falls back to the global uploads dir when
+    // the kernel didn't wire a resolver (tests, legacy callers).
+    const targetDir = this._resolveWorkspaceCwd
+      ? this._resolveWorkspaceCwd(chatId)
+      : undefined;
+
+    const content: UserMessage["content"] = [];
+    // When the user reply-quoted an earlier message AND the new message
+    // is directed at the bot, surface the quoted context so Claude can
+    // see what they're actually pointing at. Skip when it's just an
+    // in-thread reply with no explicit quote signal to the bot. Slash
+    // commands are gateway-level and operate on bot state — prepending
+    // the quoted block would corrupt the leading `/…` and prevent the
+    // kernel from routing it.
+    if (parentId && isIntendedForBot && !isSlashCommand) {
+      const info = await this._fetchQuotedMessage(parentId, targetDir);
+      content.push({
+        type: "text",
+        text: _formatQuotedBlock(info, parentId),
+      });
+    }
+    content.push(
+      await this._parseMessageContent(
+        messageId,
+        receivedMessage.message_type,
+        receivedMessage.content,
+        targetDir,
+      ),
+    );
     const userMessage: UserMessage = {
       id: messageId,
       session_id,
       role: "user",
-      content: [
-        await this._parseMessageContent(
-          messageId,
-          receivedMessage.message_type,
-          receivedMessage.content,
-        ),
-      ],
+      channel_id: this.id,
+      chat_id: chatId,
+      chat_type: normalizedChatType,
+      thread_id: threadId,
+      sender_open_id: senderOpenId,
+      mentions:
+        normalizedMentions.length > 0 ? normalizedMentions : undefined,
+      content,
     };
     this.emit("message:inbound", userMessage);
   };
@@ -575,45 +1365,363 @@ export class FeishuMessageChannel
     this.emit("message:recalled", data.message_id, this.id);
   };
 
-  private _threadIdToSessionId = new Map<string, string>();
+  /**
+   * Handle a `card.action.trigger` event delivered via the WS event stream.
+   * Normalizes the provider-specific shape into `CardActionPayload` and emits
+   * `card:action`; the kernel dispatches by `action_name`.
+   */
+  private _handleCardAction = async (data: {
+    operator?: { open_id?: string; tenant_key?: string };
+    action?: {
+      value?: Record<string, unknown>;
+      form_value?: Record<string, unknown>;
+      tag?: string;
+      name?: string;
+    };
+    context?: { open_message_id?: string; open_chat_id?: string };
+  }) => {
+    const messageId = data.context?.open_message_id;
+    const operatorOpenId = data.operator?.open_id;
+    if (!messageId || !operatorOpenId) {
+      this._logger.warn(
+        { data },
+        "ignoring card.action.trigger with missing message_id/operator",
+      );
+      return;
+    }
+    const value = data.action?.value ?? {};
+    // `action.value.action` is set for callback buttons (`behaviors[].value`).
+    // For form_submit buttons we don't attach behaviors, so fall back to the
+    // submit button's `name`, which Feishu echoes at `action.name`. That makes
+    // the submit-button name the de-facto action discriminator for forms.
+    const actionName =
+      typeof value.action === "string"
+        ? value.action
+        : typeof data.action?.name === "string"
+          ? data.action.name
+          : "";
+    const payload: CardActionPayload = {
+      message_id: messageId,
+      channel_id: this.id,
+      chat_id: data.context?.open_chat_id,
+      operator_open_id: operatorOpenId,
+      action_name: actionName,
+      value,
+      form_value: data.action?.form_value ?? {},
+    };
+    this._logger.info(
+      {
+        message_id: messageId,
+        action_name: actionName,
+        operator_open_id: operatorOpenId,
+        form_value: data.action?.form_value,
+        raw_value: value,
+      },
+      "card action",
+    );
+    // Defer downstream dispatch to a later macrotask so the synchronous ack
+    // below reaches Feishu first. `emit` runs listeners synchronously, and a
+    // handler may do blocking sync work (e.g. workspace deletion calls
+    // `rmSync` on a directory tree), which would otherwise stall the event
+    // loop before this function can return its ack — causing the card button
+    // to hit Feishu's callback timeout while the work is still running.
+    setTimeout(() => {
+      this.emit("card:action", payload);
+    }, 0);
+    // Acknowledge the action back to Feishu via the WS response (the SDK
+    // base64-encodes this as respPayload.data). Without an ack, the card UI
+    // can surface a generic failure toast while the real work happens
+    // asynchronously. Handlers downstream update the card in-place via
+    // `updateRawCard` when done.
+    return {
+      toast: { type: "info", content: "已收到，正在处理…" },
+    };
+  };
 
-  /** Persist a thread→session mapping to DB and update the in-memory cache. */
-  private _mapThreadToSession(threadId: string, sessionId: string) {
-    this._threadIdToSessionId.set(threadId, sessionId);
+  private _threadState = new Map<
+    string,
+    { session_id: string; auto_respond: boolean }
+  >();
+
+  /**
+   * Returns true when the thread is explicitly opted into "auto respond"
+   * mode, i.e. the operator ran `/unmute` in it. Default for every
+   * bot-participated thread is false — group messages must still @-mention
+   * the bot even inside a bot-owned topic. Cheap: in-memory cache first,
+   * then indexed single-row lookup on `feishu_threads`.
+   */
+  private _isThreadAutoRespond(threadId: string | undefined): boolean {
+    if (!threadId) return false;
+    const cached = this._threadState.get(threadId);
+    if (cached) return cached.auto_respond;
+    const row = this._db
+      .select({
+        session_id: feishuThreads.session_id,
+        auto_respond: feishuThreads.auto_respond,
+      })
+      .from(feishuThreads)
+      .where(eq(feishuThreads.thread_id, threadId))
+      .get();
+    if (row) {
+      const state = {
+        session_id: row.session_id,
+        auto_respond: row.auto_respond === 1,
+      };
+      this._threadState.set(threadId, state);
+      return state.auto_respond;
+    }
+    return false;
+  }
+
+  /**
+   * Public lookup of a thread's mapping row: the bound session_id and the
+   * auto-respond flag. Returns undefined when neither the in-memory cache
+   * nor the `feishu_threads` table knows about the thread (e.g. the topic
+   * was just opened and the bot hasn't replied into it yet).
+   *
+   * Used by `/topic` to surface "where am I" info without leaking the
+   * private DB shape.
+   */
+  getThreadInfo(
+    threadId: string,
+  ): { session_id: string; auto_respond: boolean } | undefined {
+    const cached = this._threadState.get(threadId);
+    if (cached) return { ...cached };
+    const row = this._db
+      .select({
+        session_id: feishuThreads.session_id,
+        auto_respond: feishuThreads.auto_respond,
+      })
+      .from(feishuThreads)
+      .where(eq(feishuThreads.thread_id, threadId))
+      .get();
+    if (!row) return undefined;
+    const state = {
+      session_id: row.session_id,
+      auto_respond: row.auto_respond === 1,
+    };
+    this._threadState.set(threadId, state);
+    return { ...state };
+  }
+
+  /**
+   * Flip the auto-respond flag on a thread. Persists to DB and updates the
+   * in-memory cache so the change takes effect on the very next inbound
+   * message. Creates the row if missing, though typically the thread has
+   * already been mapped by {@link _mapThreadToSession} via an earlier bot
+   * reply. Returns the resolved session id for the thread.
+   */
+  setThreadAutoRespond(
+    threadId: string,
+    enabled: boolean,
+    fallbackSessionId: string,
+  ): string {
+    const current = this._threadState.get(threadId);
+    const sessionId = current?.session_id ?? fallbackSessionId;
+    this._threadState.set(threadId, {
+      session_id: sessionId,
+      auto_respond: enabled,
+    });
+    const flag = enabled ? 1 : 0;
     this._db
       .insert(feishuThreads)
       .values({
         thread_id: threadId,
         session_id: sessionId,
         created_at: Date.now(),
+        auto_respond: flag,
+      })
+      .onConflictDoUpdate({
+        target: feishuThreads.thread_id,
+        set: { auto_respond: flag },
+      })
+      .run();
+    return sessionId;
+  }
+
+  /** Persist a thread→session mapping to DB and update the in-memory cache. */
+  private _mapThreadToSession(threadId: string, sessionId: string) {
+    const existing = this._threadState.get(threadId);
+    if (!existing) {
+      this._threadState.set(threadId, {
+        session_id: sessionId,
+        auto_respond: false,
+      });
+    }
+    this._db
+      .insert(feishuThreads)
+      .values({
+        thread_id: threadId,
+        session_id: sessionId,
+        created_at: Date.now(),
+        auto_respond: 0,
       })
       .onConflictDoNothing()
       .run();
   }
 
-  /** Resolve a session ID from a thread ID, falling back to DB then generating a new one. */
-  private _resolveSessionId(threadId: string | undefined): string {
-    if (threadId && this._threadIdToSessionId.has(threadId)) {
-      return this._threadIdToSessionId.get(threadId)!;
-    }
+  /**
+   * Resolve session id for an inbound Feishu message.
+   *
+   * Lookup order:
+   * 1. In-memory thread→session cache
+   * 2. `feishu_threads` DB mapping (populated when the bot replies and Feishu
+   *    creates a new thread — see `_mapThreadToSession`)
+   * 3. When both chat_id + thread_id are known, derive deterministically as
+   *    `feishu:<chat>:<thread>` and persist that mapping so subsequent lookups
+   *    short-circuit.
+   * 4. Fall back to `uuid()` when no thread_id (first @mention outside any
+   *    topic).
+   */
+  private _resolveSessionId(
+    chatId: string | undefined,
+    threadId: string | undefined,
+  ): string {
     if (threadId) {
+      const cached = this._threadState.get(threadId);
+      if (cached) return cached.session_id;
       const row = this._db
-        .select({ session_id: feishuThreads.session_id })
+        .select({
+          session_id: feishuThreads.session_id,
+          auto_respond: feishuThreads.auto_respond,
+        })
         .from(feishuThreads)
         .where(eq(feishuThreads.thread_id, threadId))
         .get();
       if (row) {
-        this._threadIdToSessionId.set(threadId, row.session_id);
+        this._threadState.set(threadId, {
+          session_id: row.session_id,
+          auto_respond: row.auto_respond === 1,
+        });
         return row.session_id;
+      }
+      if (chatId) {
+        const derived = `feishu:${chatId}:${threadId}`;
+        this._mapThreadToSession(threadId, derived);
+        return derived;
       }
     }
     return uuid();
+  }
+
+  /**
+   * Pull the message the user reply-quoted so Claude can see what the new
+   * message is actually *about*. Returns a normalized `QuotedInfo` or
+   * `null` if the message can't be read (recalled, permission missing,
+   * network error) — callers should render a "消息已撤回或无法读取"
+   * placeholder in that case, not pretend the quote wasn't there.
+   */
+  private async _fetchQuotedMessage(
+    parentId: string,
+    targetDir?: string,
+  ): Promise<_QuotedInfo | null> {
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- SDK types are thin here
+      const res = await (this._client.im.message as any).get({
+        path: { message_id: parentId },
+      });
+      const item = res?.data?.items?.[0] as
+        | {
+            msg_type?: string;
+            create_time?: string;
+            sender?: { id?: string; id_type?: string };
+            body?: { content?: string };
+          }
+        | undefined;
+      if (!item) return null;
+      const msgType = item.msg_type ?? "unknown";
+      const createdAt = item.create_time
+        ? Number(item.create_time)
+        : undefined;
+      const senderOpenId =
+        item.sender?.id_type === "open_id" ? item.sender.id : undefined;
+      const text = await this._extractQuotedText(
+        parentId,
+        msgType,
+        item.body?.content ?? "{}",
+        targetDir,
+      );
+      return {
+        message_id: parentId,
+        message_type: msgType,
+        sender_open_id: senderOpenId,
+        created_at: createdAt,
+        text,
+      };
+    } catch (err) {
+      this._logger.warn(
+        { err, message_id: parentId },
+        "failed to fetch quoted message",
+      );
+      return null;
+    }
+  }
+
+  /**
+   * Reduce a quoted message to a single text representation. Text/post
+   * get extracted verbatim; opaque types (image, file, card, sticker…)
+   * get a human-readable placeholder so Claude can still reason about
+   * "what did the user point at" without needing to download the asset.
+   */
+  private async _extractQuotedText(
+    messageId: string,
+    type: string,
+    rawContent: string,
+    targetDir?: string,
+  ): Promise<string> {
+    let json: Record<string, unknown>;
+    try {
+      json = JSON.parse(rawContent) as Record<string, unknown>;
+    } catch {
+      return "[无法解析的消息内容]";
+    }
+    if (type === "text") {
+      return typeof json.text === "string" ? json.text : "";
+    }
+    if (type === "post") {
+      try {
+        return await convertPostToMarkdown(json, (file_key) =>
+          this.downloadMessageResource(messageId, file_key, { targetDir }),
+        );
+      } catch {
+        return "[富文本消息]";
+      }
+    }
+    if (type === "image") {
+      // Download + embed as markdown image so Claude Code's multimodal
+      // pipeline picks it up, same way a directly-uploaded image works.
+      try {
+        const fileKey =
+          typeof json.image_key === "string" ? json.image_key : null;
+        if (!fileKey) return "[图片]";
+        const path = await this.downloadMessageResource(messageId, fileKey, {
+          targetDir,
+        });
+        return `![quoted_image](${path})`;
+      } catch (err) {
+        this._logger.warn(
+          { err, message_id: messageId },
+          "failed to download quoted image",
+        );
+        return "[图片(下载失败)]";
+      }
+    }
+    if (type === "file") {
+      const name = typeof json.file_name === "string" ? json.file_name : "";
+      return name ? `[文件: ${name}]` : "[文件]";
+    }
+    if (type === "audio") return "[语音]";
+    if (type === "media") return "[视频]";
+    if (type === "sticker") return "[表情]";
+    if (type === "interactive") return "[卡片]";
+    return `[${type} 消息]`;
   }
 
   private async _parseMessageContent(
     messageId: string,
     type: string,
     content: string,
+    targetDir?: string,
   ): Promise<TextMessageContent> {
     const json = JSON.parse(content);
     if (type === "text") {
@@ -622,9 +1730,8 @@ export class FeishuMessageChannel
         text: json.text,
       };
     } else if (type === "post") {
-      const markdown = await convertPostToMarkdown(
-        json,
-        this.downloadMessageResource.bind(this, messageId),
+      const markdown = await convertPostToMarkdown(json, (file_key) =>
+        this.downloadMessageResource(messageId, file_key, { targetDir }),
       );
       return {
         type: "text",
@@ -632,7 +1739,9 @@ export class FeishuMessageChannel
       };
     } else if (type === "image") {
       const file_key = json.image_key as string;
-      const path = await this.downloadMessageResource(messageId, file_key);
+      const path = await this.downloadMessageResource(messageId, file_key, {
+        targetDir,
+      });
       return {
         type: "text",
         text: `![user_uploaded_image](${path})`,
@@ -640,11 +1749,10 @@ export class FeishuMessageChannel
     } else if (type === "file") {
       const file_key = json.file_key as string;
       const file_name = json.file_name as string;
-      const path = await this.downloadMessageResource(
-        messageId,
-        file_key,
+      const path = await this.downloadMessageResource(messageId, file_key, {
         file_name,
-      );
+        targetDir,
+      });
       return {
         type: "text",
         text: `A new file message uploaded to \`${path}\``,
@@ -653,5 +1761,99 @@ export class FeishuMessageChannel
       this._logger.error(`Unsupported message type: ${type}`);
       return { type: "text", text: "Unsupported message type" + type };
     }
+  }
+}
+
+/**
+ * Normalized shape of a reply-quoted Feishu message, ready to format
+ * into a `<quoted_message>` block.
+ */
+interface _QuotedInfo {
+  message_id: string;
+  message_type: string;
+  sender_open_id?: string;
+  created_at?: number;
+  text: string;
+}
+
+/** Max characters of quoted text surfaced to Claude. */
+const _QUOTED_TEXT_MAX_CHARS = 500;
+
+/**
+ * Format a quoted message as a structured `<quoted_message>` block the
+ * agent can reason about. Pass `null` to render a "revoked / unreadable"
+ * placeholder block — the agent still sees that a quote existed, which
+ * is better than silently dropping the signal.
+ */
+function _formatQuotedBlock(
+  info: _QuotedInfo | null,
+  parentId?: string,
+): string {
+  if (info === null) {
+    const idAttr = parentId ? ` id="${_escapeAttr(parentId)}"` : "";
+    return (
+      `<quoted_message${idAttr} status="unavailable">\n` +
+      `[该消息已撤回或无法读取]\n` +
+      `</quoted_message>`
+    );
+  }
+  const attrs: string[] = [
+    `id="${_escapeAttr(info.message_id)}"`,
+    `type="${_escapeAttr(info.message_type)}"`,
+  ];
+  if (info.sender_open_id) {
+    attrs.push(`author_open_id="${_escapeAttr(info.sender_open_id)}"`);
+  }
+  if (info.created_at) {
+    attrs.push(`time="${new Date(info.created_at).toISOString()}"`);
+  }
+  const { text, truncated } = _truncateQuotedText(
+    info.text,
+    _QUOTED_TEXT_MAX_CHARS,
+  );
+  if (truncated) attrs.push(`truncated="true"`);
+  return (
+    `<quoted_message ${attrs.join(" ")}>\n` + text + `\n</quoted_message>`
+  );
+}
+
+/** Clip quoted text to a char budget; append an ellipsis when trimmed. */
+function _truncateQuotedText(
+  text: string,
+  maxChars: number,
+): { text: string; truncated: boolean } {
+  if (text.length <= maxChars) return { text, truncated: false };
+  return { text: text.slice(0, maxChars - 1) + "…", truncated: true };
+}
+
+/** Escape a string for safe use inside an XML attribute. */
+function _escapeAttr(value: string): string {
+  return value
+    .replaceAll("&", "&amp;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;");
+}
+
+/**
+ * Cheap check for whether an inbound Feishu message looks like a slash
+ * command, so we can skip the @-mention requirement for those. We only
+ * inspect raw `text` content — post/image/file messages are never
+ * considered slash commands. Parsing failures → treat as non-slash.
+ */
+function _peekSlashCommand(type: string, content: string): boolean {
+  if (type !== "text") return false;
+  try {
+    const json = JSON.parse(content) as { text?: unknown };
+    if (typeof json.text !== "string") return false;
+    // Strip leading @_user_N placeholder runs — users habitually @ the
+    // bot before typing a slash command inside a thread, and the
+    // placeholder would otherwise hide the `/` prefix.
+    const text = json.text
+      .trimStart()
+      .replace(/^(?:@_user_\d+\s*)+/, "");
+    return /^\/[a-zA-Z]/.test(text);
+  } catch {
+    return false;
   }
 }

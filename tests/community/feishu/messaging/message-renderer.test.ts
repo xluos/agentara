@@ -1,6 +1,9 @@
 import { describe, expect, test } from "bun:test";
 
-import { renderMessageCard } from "@/community/feishu/messaging/message-renderer";
+import {
+  MAX_STEPS_PER_CARD,
+  renderMessageCard,
+} from "@/community/feishu/messaging/message-renderer";
 
 function countElements(value: unknown): number {
   if (!value || typeof value !== "object") {
@@ -43,6 +46,6 @@ describe("renderMessageCard", () => {
 
     expect(countElements(card)).toBeLessThanOrEqual(200);
     expect(stepPanel?.tag).toBe("collapsible_panel");
-    expect(stepPanel?.elements.length).toBe(65);
+    expect(stepPanel?.elements.length).toBe(MAX_STEPS_PER_CARD);
   });
 });

@@ -1,10 +1,18 @@
 import { existsSync, unlinkSync } from "node:fs";
 
-import { and, desc, eq, isNull } from "drizzle-orm";
+import { and, desc, eq } from "drizzle-orm";
 
 import type { DrizzleDB } from "@/data";
-import { config, createLogger, extractTextContent, uuid } from "@/shared";
+import {
+  config,
+  createLogger,
+  extractTextContent,
+  inlineMentions,
+  uuid,
+} from "@/shared";
 import type { Session as SessionEntity, UserMessage } from "@/shared";
+
+import { getRuntimeDefaultAgentType, resolveAgentTypeAlias } from "../agents";
 
 import { sessions } from "./data";
 import { Session } from "./session";
@@ -21,7 +29,7 @@ import {
 export interface SessionResolveOptions {
   /**
    * The type of agent runner (e.g. "claude-code").
-   * Defaults to `config.agents.default.type`.
+   * Defaults to the runtime default agent type.
    */
   agentType?: string;
 
@@ -35,6 +43,28 @@ export interface SessionResolveOptions {
    * The channel id this session belongs to.
    */
   channelId?: string;
+
+  /**
+   * Feishu chat_id for this session. Stored on create, not used on resume.
+   */
+  chatId?: string | null;
+
+  /**
+   * Feishu thread/topic id for this session. Stored on create, not used on resume.
+   */
+  threadId?: string | null;
+
+  /**
+   * Extra env vars to pass into the runner spawn (e.g. DEV_ASSETS_PRIMARY_REPO).
+   * Not persisted; re-resolved on every dispatch from group binding.
+   */
+  envExtras?: Record<string, string>;
+
+  /**
+   * Resume the Agentara session row but start a fresh underlying runner
+   * session/thread. Used when a provider-specific resume id is stale.
+   */
+  forceNewRunnerSession?: boolean;
 
   /**
    * The first message of the session.
@@ -79,7 +109,7 @@ export class SessionManager {
   /**
    * Resolves session by database existence: creates if missing, resumes if exists.
    * @param sessionId - The session identifier.
-   * @param options - Optional agent_type and cwd (default from config).
+   * @param options - Optional agent_type and cwd (default from runtime/config).
    * @returns A Session instance.
    */
   async resolveSession(
@@ -95,7 +125,7 @@ export class SessionManager {
   /**
    * Creates a new session and inserts a row into the database.
    * @param sessionId - The session identifier.
-   * @param options - Optional agent_type and cwd (default from config).
+   * @param options - Optional agent_type and cwd (default from runtime/config).
    * @returns A Session instance with isNewSession: true.
    * @throws SessionAlreadyExistsError if the session already exists.
    */
@@ -107,9 +137,13 @@ export class SessionManager {
       throw new SessionAlreadyExistsError(sessionId);
     }
 
-    const agentType = options?.agentType ?? config.agents.default.type;
+    const requestedAgentType = options?.agentType ?? getRuntimeDefaultAgentType();
+    const agentType = resolveAgentTypeAlias(requestedAgentType);
     const cwd = options?.cwd ?? config.paths.home;
     const channelId = options?.channelId ?? null;
+    const chatId = options?.chatId ?? null;
+    const threadId = options?.threadId ?? null;
+    const envExtras = options?.envExtras;
     const now = Date.now();
 
     this._db
@@ -119,6 +153,8 @@ export class SessionManager {
         agent_type: agentType,
         cwd,
         channel_id: channelId,
+        chat_id: chatId,
+        thread_id: threadId,
         last_message_created_at: null,
         runner_session_id: null,
         created_at: now,
@@ -129,14 +165,28 @@ export class SessionManager {
     if (options?.firstMessage) {
       this._updateFirstMessage(
         sessionId,
-        extractTextContent(options.firstMessage),
+        inlineMentions(
+          extractTextContent(options.firstMessage),
+          options.firstMessage.mentions,
+        ),
       );
     }
 
+    if (agentType !== requestedAgentType) {
+      this._logger.info(
+        {
+          session_id: sessionId,
+          requested_agent_type: requestedAgentType,
+          resolved_agent_type: agentType,
+        },
+        "legacy agent type resolved for new session",
+      );
+    }
     this._logger.info(`Creating session: ${sessionId}`);
     const session = new Session(sessionId, agentType, {
       isNewSession: true,
       cwd,
+      envExtras,
       runnerSessionId: undefined,
     });
     this._attachWriter(session, sessionId);
@@ -215,14 +265,29 @@ export class SessionManager {
       throw new SessionNotFoundError(sessionId);
     }
 
+    const requestedAgentType = options?.agentType ?? row.agent_type;
+    const agentType = resolveAgentTypeAlias(requestedAgentType);
+    if (agentType !== requestedAgentType) {
+      this._logger.info(
+        {
+          session_id: sessionId,
+          requested_agent_type: requestedAgentType,
+          resolved_agent_type: agentType,
+        },
+        "legacy agent type resolved for resumed session",
+      );
+    }
     this._logger.info(`Resuming session: ${sessionId}`);
     const session = new Session(
       sessionId,
-      options?.agentType ?? row.agent_type,
+      agentType,
       {
-        isNewSession: false,
+        isNewSession: options?.forceNewRunnerSession ?? false,
         cwd: options?.cwd ?? row.cwd,
-        runnerSessionId: row.runner_session_id ?? undefined,
+        envExtras: options?.envExtras,
+        runnerSessionId: options?.forceNewRunnerSession
+          ? undefined
+          : row.runner_session_id ?? undefined,
       },
     );
     this._attachWriter(session, sessionId);
@@ -245,6 +310,20 @@ export class SessionManager {
   }
 
   /**
+   * Returns the persisted session row, or undefined if not found. Read-only
+   * accessor for commands that need to surface session metadata
+   * (e.g. `/topic` shows agent_type and runner_session_id).
+   */
+  getSession(sessionId: string): SessionEntity | undefined {
+    const row = this._db
+      .select()
+      .from(sessions)
+      .where(eq(sessions.id, sessionId))
+      .get();
+    return row ? this._toSessionEntity(row) : undefined;
+  }
+
+  /**
    * Removes a session: deletes the database record and the associated JSONL file.
    * @param sessionId - The session identifier.
    * @throws SessionNotFoundError if the session does not exist.
@@ -259,6 +338,17 @@ export class SessionManager {
       unlinkSync(filePath);
     }
     this._logger.info(`Removed session: ${sessionId}`);
+  }
+
+  resetRunnerSessionId(sessionId: string): void {
+    this._db
+      .update(sessions)
+      .set({
+        runner_session_id: null,
+        updated_at: Date.now(),
+      })
+      .where(eq(sessions.id, sessionId))
+      .run();
   }
 
   /**
@@ -301,9 +391,7 @@ export class SessionManager {
         runner_session_id: runnerSessionId,
         updated_at: Date.now(),
       })
-      .where(
-        and(eq(sessions.id, sessionId), isNull(sessions.runner_session_id)),
-      )
+      .where(eq(sessions.id, sessionId))
       .run();
   }
 

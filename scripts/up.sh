@@ -33,7 +33,7 @@ echo "Starting Agentara in the background..."
 
 # Start backend server
 cd "$PROJECT_DIR"
-nohup bun run dev:server > "$LOG_DIR/server.log" 2>&1 &
+nohup bun run start:server > "$LOG_DIR/server.log" 2>&1 &
 SERVER_PID=$!
 sleep 1
 if ! kill -0 "$SERVER_PID" 2>/dev/null; then

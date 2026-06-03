@@ -2,6 +2,7 @@ export { cronjobsRoutes } from "./cronjobs";
 export { handoffRoutes } from "./handoff";
 export { healthRoutes } from "./health";
 export { memoryRoutes } from "./memory";
+export { permissionRoutes } from "./permission";
 export { sessionRoutes } from "./sessions";
 export { skillsRoutes } from "./skills";
 export { taskRoutes } from "./tasks";

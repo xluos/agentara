@@ -27,10 +27,24 @@ export const AgentRunOptions = z.object({
   runnerSessionId: z.string().optional(),
 
   /**
+   * Extra environment variables merged into the runner's spawn env. Used to
+   * thread per-group hints (e.g. `DEV_ASSETS_PRIMARY_REPO`) into Claude/Codex
+   * CLI invocations without touching the caller's process env.
+   */
+  envExtras: z.record(z.string(), z.string()).optional(),
+
+  /**
    * Abort signal for cancelling the running task.
    * When aborted, the agent runner should kill any spawned subprocesses.
    */
   signal: z.instanceof(AbortSignal).optional(),
+
+  /**
+   * When `true`, the Claude CLI is spawned with
+   * `--dangerously-skip-permissions` so every tool call is auto-approved.
+   * Off by default — only the gated/robot-facing wrappers should set it.
+   */
+  dangerouslySkipPermissions: z.boolean().optional(),
 });
 export interface AgentRunOptions extends z.infer<typeof AgentRunOptions> {}
 

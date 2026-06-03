@@ -1,0 +1,1 @@
+ALTER TABLE `feishu_threads` ADD `auto_respond` integer DEFAULT 0 NOT NULL;

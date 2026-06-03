@@ -9,6 +9,7 @@ import { dirname } from "node:path";
 import {
   logger,
   extractTextContent,
+  inlineMentions,
   isPureTextMessage,
   type Message,
 } from "@/shared";
@@ -52,6 +53,8 @@ export function formatFileLine(message: Message): string | null {
   if (!isPureTextMessage(message)) {
     return null;
   }
-  const text = extractTextContent(message);
+  const raw = extractTextContent(message);
+  const text =
+    message.role === "user" ? inlineMentions(raw, message.mentions) : raw;
   return `${message.role.toUpperCase()}:\n${text}`;
 }

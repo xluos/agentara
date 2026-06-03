@@ -4,6 +4,8 @@ import EventEmitter from "eventemitter3";
 import type { DrizzleDB } from "@/data";
 import type {
   AssistantMessage,
+  CardActionPayload,
+  CardFooterStats,
   MessageChannel,
   MessageGateway,
   MessageGatewayEventTypes,
@@ -47,6 +49,9 @@ export class MultiChannelMessageGateway
     channel.on("message:recalled", (messageId: string, channelId: string) => {
       this.emit("message:recalled", messageId, channelId);
     });
+    channel.on("card:action", (payload: CardActionPayload) => {
+      this.emit("card:action", payload);
+    });
     this._logger.info(`Registered channel: ${channel.id}`);
   }
 
@@ -63,47 +68,57 @@ export class MultiChannelMessageGateway
 
   /**
    * Post a new assistant message without replying to an existing message.
-   * Routes to the correct channel based on session `channel_id`.
+   * Routes by the explicit `options.channelId` when provided, otherwise by the
+   * session's persisted `channel_id`.
    * @param message - The assistant message to post (without id).
+   * @param options - Optional settings.
    * @returns The posted message with id assigned.
    */
   async postMessage(
     message: Omit<AssistantMessage, "id">,
+    options?: { channelId?: string },
   ): Promise<AssistantMessage> {
-    const channel = this._resolveChannelForSession(message.session_id);
+    const channel = this._resolveChannelFor(message.session_id, options?.channelId);
     const result = await channel.postMessage(message);
     return result;
   }
 
   /**
    * Reply to an existing message.
-   * Routes to the correct channel based on session `channel_id`.
+   * Routes by the explicit `options.channelId` when provided, otherwise by the
+   * session's persisted `channel_id`. Pass `channelId` for gateway-level replies
+   * that fire before any Session is created.
    * @param messageId - ID of the message to reply to.
    * @param message - The assistant message to send (without id).
-   * @param options - Optional settings (e.g. streaming mode).
+   * @param options - Optional settings.
    * @returns The sent message with id assigned.
    */
   async replyMessage(
     messageId: string,
     message: Omit<AssistantMessage, "id">,
-    options?: { streaming?: boolean },
+    options?: {
+      streaming?: boolean;
+      channelId?: string;
+      replyInThread?: boolean;
+    },
   ): Promise<AssistantMessage> {
-    const channel = this._resolveChannelForSession(message.session_id);
+    const channel = this._resolveChannelFor(message.session_id, options?.channelId);
     const result = await channel.replyMessage(messageId, message, options);
     return result;
   }
 
   /**
    * Update the content of an existing message.
-   * Routes to the correct channel based on session `channel_id`.
+   * Routes by the explicit `options.channelId` when provided, otherwise by the
+   * session's persisted `channel_id`.
    * @param message - The assistant message with updated content.
-   * @param options - Optional settings (e.g. streaming mode).
+   * @param options - Optional settings.
    */
   async updateMessageContent(
     message: AssistantMessage,
-    options?: { streaming?: boolean },
+    options?: { streaming?: boolean; channelId?: string; footer?: CardFooterStats },
   ): Promise<void> {
-    const channel = this._resolveChannelForSession(message.session_id);
+    const channel = this._resolveChannelFor(message.session_id, options?.channelId);
     await channel.updateMessageContent(message, options);
   }
 
@@ -120,13 +135,18 @@ export class MultiChannelMessageGateway
   }
 
   /**
-   * Resolves the correct channel for a session by querying the `channel_id`
-   * from the sessions table.
-   * @param sessionId - The session identifier.
-   * @returns The matching MessageChannel.
-   * @throws If the session has no channel_id or the channel is not registered.
+   * Resolves the target channel. If `explicitChannelId` is provided, it wins
+   * (used for gateway-level replies before any Session is persisted). Otherwise
+   * falls back to querying `channel_id` from the sessions table.
+   * @throws If neither path yields a registered channel.
    */
-  private _resolveChannelForSession(sessionId: string): MessageChannel {
+  private _resolveChannelFor(
+    sessionId: string,
+    explicitChannelId?: string,
+  ): MessageChannel {
+    if (explicitChannelId) {
+      return this._resolveChannel(explicitChannelId);
+    }
     const row = this._db
       .select({ channel_id: sessions.channel_id })
       .from(sessions)
