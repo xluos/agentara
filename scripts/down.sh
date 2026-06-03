@@ -10,7 +10,7 @@ EXIT_CODE=0
 # Expected command patterns per process name
 expected_cmd_for() {
   case "$1" in
-    server) echo "bun run start:server" ;;
+    server) echo "bun run start:supervised" ;;
     web)    echo "bun run dev:web" ;;
     *)      echo "" ;;
   esac
@@ -136,6 +136,8 @@ sweep_orphans() {
   local self=$$
   local pattern pid candidates=""
   for pattern in \
+    "bun run start:supervised" \
+    "src/supervisor/supervisor.ts" \
     "bun run start:server" \
     "bun run index.ts" \
     "bun run dev:web" \

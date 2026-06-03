@@ -300,6 +300,16 @@ export class SessionManager {
   }
 
   /**
+   * Marks the session as having completed an agent turn successfully.
+   * Failed or cancelled agent starts must not update this timestamp; the idle
+   * auto-compact gate depends on the last successful interaction, not the last
+   * attempted dispatch.
+   */
+  markSuccessfulInteraction(sessionId: string): void {
+    this._updateLastMessageCreatedAt(sessionId);
+  }
+
+  /**
    * Updates the `last_message_created_at` and `updated_at` timestamps for a session.
    * @param sessionId - The session identifier.
    */
@@ -322,7 +332,6 @@ export class SessionManager {
       .update(sessions)
       .set({
         first_message: firstMessage,
-        last_message_created_at: Date.now(),
         updated_at: Date.now(),
       })
       .where(and(eq(sessions.id, sessionId), eq(sessions.first_message, "")))
@@ -357,7 +366,6 @@ export class SessionManager {
       logWriter.write(message);
       fileWriter.write(message);
       this._diaryWriter.write(message);
-      this._updateLastMessageCreatedAt(sessionId);
     });
   }
 }

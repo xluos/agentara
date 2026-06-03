@@ -15,6 +15,7 @@ import type {
   AssistantMessage,
   CardActionPayload,
   CardFooterStats,
+  Session as SessionEntity,
   UserMessage,
 } from "@/shared";
 import {
@@ -58,7 +59,7 @@ import { GroupFlow } from "./group/group-flow";
 import { MultiChannelMessageGateway } from "./messaging";
 import { PERMISSION_ACTION, PermissionFlow, QUESTION_ACTION } from "./permission";
 import { ReposFlow } from "./repos";
-import { SessionManager } from "./sessioning";
+import { readLatestSessionUsageSnapshot, SessionManager } from "./sessioning";
 import * as sessioningSchema from "./sessioning/data";
 import { SettingFlow } from "./setting/setting-flow";
 import { SETUP_DISMISS_ACTION } from "./setup/setup-card";
@@ -67,6 +68,9 @@ import { SwitchFlow } from "./setup/switch-flow";
 import { TaskDispatcher } from "./tasking";
 import * as taskingSchema from "./tasking/data";
 import { GroupWorkspaceStore, syncWorkspace } from "./workspaces";
+
+const AUTO_COMPACT_TOKEN_THRESHOLD = 200_000;
+const AUTO_COMPACT_IDLE_MS = 60 * 60 * 1000;
 
 /**
  * The kernel is the main entry point for the agentara application.
@@ -838,6 +842,7 @@ class Kernel {
   ) => {
     const inboundMessage = payload.message;
     const resolution = this._workspaceStore.resolve(inboundMessage.chat_id);
+    const existingSession = this._sessionManager.getSession(sessionId);
     const session = await this._sessionManager.resolveSession(sessionId, {
       channelId: inboundMessage.channel_id,
       chatId: inboundMessage.chat_id,
@@ -871,6 +876,13 @@ class Kernel {
     // usage/model and would otherwise blank out the footer.
     let lastUsageMessage: AssistantMessage | undefined;
     try {
+      await this._maybeAutoCompactIdleHighContextSession(
+        session,
+        inboundMessage,
+        outboundMessage,
+        existingSession,
+        signal,
+      );
       const stream = await session.stream(inboundMessage, { signal });
       for await (const message of stream) {
         if (message.role === "assistant") {
@@ -888,6 +900,7 @@ class Kernel {
       if (!lastMessage) {
         throw new Error("No assistant message received from the agent.");
       }
+      this._sessionManager.markSuccessfulInteraction(session.id);
     } catch (err) {
       if (err instanceof CodexMissingResumeError) {
         await this._handleCodexMissingResume(
@@ -900,7 +913,7 @@ class Kernel {
       }
       const failureContent = signal?.aborted
         ? buildAgentCancelledContent()
-        : buildAgentFailureContent(err);
+        : buildAgentFailureContent(err, { sessionId: session.id });
       try {
         await this._messageGateway.updateMessageContent(
           { ...outboundMessage, content: failureContent },
@@ -928,6 +941,99 @@ class Kernel {
       },
     );
   };
+
+  private async _maybeAutoCompactIdleHighContextSession(
+    session: Awaited<ReturnType<SessionManager["resolveSession"]>>,
+    inboundMessage: UserMessage,
+    outboundMessage: AssistantMessage,
+    existingSession: SessionEntity | undefined,
+    signal?: AbortSignal,
+  ): Promise<void> {
+    if (!existingSession) return;
+    if (session.options.isNewSession) return;
+    if (!this._supportsAutoCompact(session.agentType)) return;
+    const inboundText = extractTextContent(inboundMessage)
+      .trim()
+      .replace(/^(?:@_user_\d+\s*)+/, "");
+    if (inboundText === "/compact") return;
+
+    const lastInteractionAt = existingSession.last_message_created_at;
+    if (!lastInteractionAt) return;
+    const idleMs = Date.now() - lastInteractionAt;
+    if (idleMs <= AUTO_COMPACT_IDLE_MS) return;
+
+    const usage = readLatestSessionUsageSnapshot(session.id);
+    if (!usage || usage.used_tokens <= AUTO_COMPACT_TOKEN_THRESHOLD) return;
+
+    this._logger.info(
+      {
+        session_id: session.id,
+        agent_type: session.agentType,
+        used_tokens: usage.used_tokens,
+        idle_ms: idleMs,
+      },
+      "auto-compacting idle high-context session before user turn",
+    );
+
+    await this._tryUpdateAutoCompactStatus(outboundMessage, [
+      {
+        type: "text",
+        text: "检测到当前会话上下文已超过 200k tokens，且超过 1 小时没有交互，正在先自动执行 /compact 压缩上下文…",
+      },
+    ]);
+
+    try {
+      await session.run(
+        {
+          ...inboundMessage,
+          id: `${inboundMessage.id}:auto-compact`,
+          content: [{ type: "text", text: "/compact" }],
+        },
+        { signal },
+      );
+      await this._tryUpdateAutoCompactStatus(outboundMessage, [
+        {
+          type: "text",
+          text: "自动压缩已完成，继续处理你的消息…",
+        },
+      ]);
+    } catch (err) {
+      this._logger.warn(
+        {
+          err,
+          session_id: session.id,
+          used_tokens: usage.used_tokens,
+          idle_ms: idleMs,
+        },
+        "auto-compact before user turn failed; continuing with original message",
+      );
+    }
+  }
+
+  private async _tryUpdateAutoCompactStatus(
+    outboundMessage: AssistantMessage,
+    content: AssistantMessage["content"],
+  ): Promise<void> {
+    try {
+      await this._messageGateway.updateMessageContent(
+        { ...outboundMessage, content },
+        { streaming: true },
+      );
+    } catch (err) {
+      this._logger.warn(
+        {
+          err,
+          outbound_message_id: outboundMessage.id,
+          session_id: outboundMessage.session_id,
+        },
+        "failed to update auto-compact status card",
+      );
+    }
+  }
+
+  private _supportsAutoCompact(agentType: string): boolean {
+    return agentType.toLowerCase().includes("claude");
+  }
 
   /**
    * Assemble the finalized card's footer stats: context-window occupancy
@@ -1093,6 +1199,7 @@ ${payload.instruction}`,
     if (extractTextContent(assistantMessage).includes("[SKIPPED]")) {
       return;
     }
+    this._sessionManager.markSuccessfulInteraction(session.id);
     await this._messageGateway.postMessage(assistantMessage);
   };
 }

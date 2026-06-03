@@ -14,6 +14,7 @@
     "dev:server": "bun --watch run index.ts",
     "dev:web": "cd web && bun run dev",
     "start:server": "bun run index.ts",
+    "start:supervised": "bun run src/supervisor/supervisor.ts",
     "lint": "eslint . --ext .ts",
     "lint:fix": "eslint . --ext .ts --fix",
     "prepare": "husky"

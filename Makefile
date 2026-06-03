@@ -20,3 +20,6 @@ down:
 restart:
 	@bash scripts/down.sh
 	@bash scripts/up.sh
+
+install-autostart:
+	@bash scripts/install-autostart.sh

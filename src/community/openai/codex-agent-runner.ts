@@ -2,6 +2,7 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 
 import {
+  AgentCliExitError,
   config,
   createLogger,
   extractTextContent,
@@ -211,7 +212,12 @@ export class CodexAgentRunner implements AgentRunner {
         stderrChunks.length > 0
           ? decoder.decode(Bun.concatArrayBuffers(stderrChunks))
           : "";
-      throw new CodexCliExitError(exitCode, stdoutRaw, stderrText);
+      throw new AgentCliExitError({
+        runner: "Codex CLI",
+        exitCode,
+        stdout: stdoutRaw,
+        stderr: stderrText,
+      });
     }
   }
 
@@ -561,7 +567,7 @@ export class CodexAgentRunner implements AgentRunner {
   }
 
   private _isMissingResumeError(err: unknown): boolean {
-    if (!(err instanceof CodexCliExitError)) return false;
+    if (!(err instanceof AgentCliExitError)) return false;
     return this._isMissingResumeErrorText(err.stderr);
   }
 
@@ -606,24 +612,5 @@ export class CodexAgentRunner implements AgentRunner {
     } catch (err) {
       logger.warn({ err }, "Failed to sync CLAUDE.md → AGENTS.md");
     }
-  }
-}
-
-class CodexCliExitError extends Error {
-  constructor(
-    readonly exitCode: number,
-    readonly stdout: string,
-    readonly stderr: string,
-  ) {
-    const parts: string[] = [];
-    if (stdout.trim()) {
-      parts.push(`Stdout:\n${stdout.trim()}`);
-    }
-    if (stderr.trim()) {
-      parts.push(`Stderr:\n${stderr.trim()}`);
-    }
-    const detail = parts.length > 0 ? `\n\n${parts.join("\n\n")}` : "";
-    super(`Codex CLI exited with code ${exitCode}${detail}`);
-    this.name = "CodexCliExitError";
   }
 }

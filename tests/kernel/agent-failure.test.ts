@@ -1,9 +1,14 @@
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import { describe, expect, test } from "bun:test";
 
 import {
   buildAgentCancelledContent,
   buildAgentFailureContent,
 } from "@/kernel/agent-failure";
+import { AgentCliExitError, config } from "@/shared";
 
 describe("buildAgentFailureContent", () => {
   test("renders cancellation separately from failures", () => {
@@ -29,7 +34,8 @@ describe("buildAgentFailureContent", () => {
     const first = content[0]!;
     if (first.type !== "text") throw new Error("expected text content");
     expect(first.text).toContain("country=CN");
-    expect(first.text).toContain("/agent use <type>");
+    expect(first.text).toContain("代理或出口环境检查失败");
+    expect(first.text).toContain("Clash");
   });
 
   test("falls back for non-Error throws", () => {
@@ -38,5 +44,46 @@ describe("buildAgentFailureContent", () => {
     const first = content[0]!;
     if (first.type !== "text") throw new Error("expected text content");
     expect(first.text).toContain("boom");
+  });
+
+  test("summarizes Claude session limit and persists full CLI output", () => {
+    const home = mkdtempSync(join(tmpdir(), "agentara-failure-test-"));
+    const originalPaths = config.paths;
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- tests override lazily resolved paths.
+      (config as any).paths = {
+        ...config.paths,
+        runtime_logs: join(home, "runtime-logs"),
+      };
+      const stdout = [
+        '{"type":"assistant","message":{"content":[{"type":"text","text":"ignored"}]}}',
+        "{\"type\":\"result\",\"is_error\":true,\"api_error_status\":429,\"result\":\"You've hit your session limit · resets 8:50pm (Asia/Shanghai)\"}",
+      ].join("\n");
+      const content = buildAgentFailureContent(
+        new AgentCliExitError({
+          runner: "Claude Code",
+          exitCode: 1,
+          stdout,
+          stderr: "full stderr",
+        }),
+        { sessionId: "session_1" },
+      );
+
+      const first = content[0]!;
+      if (first.type !== "text") throw new Error("expected text content");
+      expect(first.text).toContain("Claude 账号达到 session limit");
+      expect(first.text).toContain("8:50pm (Asia/Shanghai)");
+      const match = first.text.match(/完整错误已落盘：`([^`]+)`/);
+      expect(match?.[1]).toBeTruthy();
+      const artifactPath = match![1]!;
+      expect(existsSync(artifactPath)).toBe(true);
+      const artifact = readFileSync(artifactPath, "utf-8");
+      expect(artifact).toContain(stdout);
+      expect(artifact).toContain("full stderr");
+    } finally {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any -- restore test override.
+      (config as any).paths = originalPaths;
+      rmSync(home, { recursive: true, force: true });
+    }
   });
 });

@@ -134,7 +134,7 @@ export function buildPermissionResultCard(options: {
         : `🚫 已拒绝 \`${tool_name}\`。`;
       break;
     case "timeout":
-      summary = `⚠️  5 分钟内未响应，已按拒绝处理 \`${tool_name}\`。`;
+      summary = `⚠️  30 分钟内未响应，已按拒绝处理 \`${tool_name}\`。`;
       break;
     case "wrong_operator":
       summary = "🚫 这不是你的权限卡片，只有发起人可以决定。";
@@ -372,7 +372,7 @@ export function buildQuestionResultCard(options: {
       summary = "✅ 已收到你的回答。";
       break;
     case "timeout":
-      summary = "⚠️  5 分钟内未回答，已按取消处理。";
+      summary = "⚠️  30 分钟内未回答，已按取消处理。";
       break;
     case "already_answered":
       summary = "ℹ️  该问题已经回答过。";

@@ -1,3 +1,5 @@
+import { Socket } from "node:net";
+
 import { ClaudeAgentRunner } from "@/community/anthropic";
 import { registerRunner } from "@/kernel/agents";
 import {
@@ -13,8 +15,7 @@ import {
 
 const _logger = createLogger("claude-gated");
 const CLASH_CONTROLLER_SOCKET = "/tmp/verge/verge-mihomo.sock";
-const HTTP_PROXY_CHECK_URL = "http://www.gstatic.com/generate_204";
-const PROXY_READY_TIMEOUT_MS = 5000;
+const PROXY_READY_TIMEOUT_MS = 1000;
 
 /**
  * Wraps {@link ClaudeAgentRunner} with the safety preamble the user runs
@@ -24,7 +25,7 @@ const PROXY_READY_TIMEOUT_MS = 5000;
  *      and use it both for the local proxy readiness check and for the
  *      delegated spawn's env.
  *   2. Check whether Clash Verge/Mihomo TUN is enabled, or whether the
- *      configured local HTTP proxy can fetch a lightweight connectivity URL.
+ *      configured local HTTP proxy port accepts TCP connections.
  *      Abort only when both are unavailable.
  *   3. Delegate to the built-in Claude runner, carrying the proxy through
  *      via `envExtras` so the inner spawn actually goes through it, and
@@ -72,7 +73,8 @@ class ClaudeGatedRunner implements AgentRunner {
 
 async function _clashProxyReady(proxy: string | undefined): Promise<string | null> {
   if (await _isClashTunEnabled()) return "tun";
-  if (proxy && (await _isHttpProxyReady(proxy))) return "http-proxy";
+  const endpoint = proxy ? _parseProxyEndpoint(proxy) : null;
+  if (endpoint && (await _isTcpPortOpen(endpoint))) return "http-proxy";
   return null;
 }
 
@@ -98,20 +100,43 @@ async function _isClashTunEnabled(): Promise<boolean> {
   }
 }
 
-async function _isHttpProxyReady(proxy: string): Promise<boolean> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), PROXY_READY_TIMEOUT_MS);
+async function _isTcpPortOpen(endpoint: {
+  hostname: string;
+  port: number;
+}): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = new Socket();
+    let settled = false;
+
+    const finish = (ready: boolean) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      socket.destroy();
+      resolve(ready);
+    };
+
+    const timer = setTimeout(() => finish(false), PROXY_READY_TIMEOUT_MS);
+    socket.once("connect", () => finish(true));
+    socket.once("error", (err) => {
+      _logger.debug({ err, endpoint }, "local proxy port check failed");
+      finish(false);
+    });
+    socket.connect(endpoint.port, endpoint.hostname);
+  });
+}
+
+function _parseProxyEndpoint(
+  proxy: string,
+): { hostname: string; port: number } | null {
   try {
-    const res = await fetch(HTTP_PROXY_CHECK_URL, {
-      signal: controller.signal,
-      proxy,
-    } as RequestInit & { proxy: string });
-    return res.status === 204 || res.ok;
+    const url = new URL(proxy);
+    const port = Number(url.port || (url.protocol === "https:" ? 443 : 80));
+    if (!url.hostname || !Number.isInteger(port)) return null;
+    return { hostname: url.hostname, port };
   } catch (err) {
-    _logger.debug({ err, proxy }, "http proxy readiness check failed");
-    return false;
-  } finally {
-    clearTimeout(timer);
+    _logger.debug({ err, proxy }, "failed to parse proxy endpoint");
+    return null;
   }
 }
 

@@ -49,7 +49,8 @@ export interface PermissionRequestParams {
 }
 
 /** Default auto-deny window when the initiator never clicks. */
-const DEFAULT_TIMEOUT_MS = 5 * 60 * 1000;
+const DEFAULT_TIMEOUT_MINUTES = 30;
+const DEFAULT_TIMEOUT_MS = DEFAULT_TIMEOUT_MINUTES * 60 * 1000;
 
 interface PendingEntry {
   request_id: string;
@@ -199,7 +200,7 @@ export class PermissionFlow {
     });
 
     return new Promise<PermissionDecision>((resolve) => {
-      const timeout = setTimeout(() => {
+      const timeout = setTimeout(async () => {
         const entry = this._pending.get(cardMessageId);
         if (!entry) return;
         this._pending.delete(cardMessageId);
@@ -211,7 +212,7 @@ export class PermissionFlow {
           },
           "permission request timed out, auto-denying",
         );
-        void this._tryUpdateCard(
+        await this._tryUpdateCard(
           params.channel_id,
           cardMessageId,
           buildPermissionResultCard({
@@ -222,7 +223,7 @@ export class PermissionFlow {
         );
         resolve({
           behavior: "deny",
-          message: "Permission request timed out after 5 minutes.",
+          message: `Permission request timed out after ${DEFAULT_TIMEOUT_MINUTES} minutes.`,
           decided_by: "timeout",
         });
       }, this._timeoutMs);
@@ -387,7 +388,7 @@ export class PermissionFlow {
     });
 
     return new Promise<PermissionDecision>((resolve) => {
-      const timeout = setTimeout(() => {
+      const timeout = setTimeout(async () => {
         const entry = this._pendingQuestions.get(cardMessageId);
         if (!entry) return;
         this._pendingQuestions.delete(cardMessageId);
@@ -395,7 +396,7 @@ export class PermissionFlow {
           { request_id: requestId, session_id: params.session_id },
           "question request timed out, auto-denying",
         );
-        void this._tryUpdateCard(
+        await this._tryUpdateCard(
           params.channel_id,
           cardMessageId,
           buildQuestionResultCard({ outcome: "timeout" }),
@@ -403,7 +404,7 @@ export class PermissionFlow {
         );
         resolve({
           behavior: "deny",
-          message: "Question timed out after 5 minutes with no answer.",
+          message: `Question timed out after ${DEFAULT_TIMEOUT_MINUTES} minutes with no answer.`,
           decided_by: "timeout",
         });
       }, this._timeoutMs);

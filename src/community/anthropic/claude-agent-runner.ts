@@ -6,6 +6,7 @@ import { fileURLToPath } from "node:url";
 
 import {
   config,
+  AgentCliExitError,
   createLogger,
   extractTextContent,
   inlineMentions,
@@ -114,6 +115,7 @@ export class ClaudeAgentRunner implements AgentRunner {
     );
     let buffer = "";
     let stdoutRaw = "";
+    let agentResultError = false;
     try {
       for await (const chunk of proc.stdout) {
         if (aborted) {
@@ -126,7 +128,11 @@ export class ClaudeAgentRunner implements AgentRunner {
         buffer = lines.pop()!;
         for (const line of lines) {
           if (line.trim()) {
-            const parsed = this._parseStreamLine(line.trim(), sessionId);
+            const trimmed = line.trim();
+            if (this._isErrorResultLine(trimmed)) {
+              agentResultError = true;
+            }
+            const parsed = this._parseStreamLine(trimmed, sessionId);
             if (parsed) {
               yield parsed;
             }
@@ -134,7 +140,11 @@ export class ClaudeAgentRunner implements AgentRunner {
         }
       }
       if (!aborted && buffer.trim()) {
-        const parsed = this._parseStreamLine(buffer.trim(), sessionId);
+        const trimmed = buffer.trim();
+        if (this._isErrorResultLine(trimmed)) {
+          agentResultError = true;
+        }
+        const parsed = this._parseStreamLine(trimmed, sessionId);
         if (parsed) {
           yield parsed;
         }
@@ -157,18 +167,28 @@ export class ClaudeAgentRunner implements AgentRunner {
         stderrChunks.length > 0
           ? decoder.decode(Bun.concatArrayBuffers(stderrChunks))
           : "";
-      const parts: string[] = [];
-      // stdout is the (already-parsed) stream-json — can be megabytes, so
-      // keep only a short tail where a trailing error result would land.
-      // stderr carries the actual failure reason, so allow it more room.
-      if (stdoutRaw.trim()) {
-        parts.push(`Stdout:\n${_clipTail(stdoutRaw.trim(), 800)}`);
-      }
-      if (stderrText.trim()) {
-        parts.push(`Stderr:\n${_clipTail(stderrText.trim(), 3000)}`);
-      }
-      const detail = parts.length > 0 ? `\n\n${parts.join("\n\n")}` : "";
-      throw new Error(`Claude Code exited with code ${exitCode}${detail}`);
+      throw new AgentCliExitError({
+        runner: "Claude Code",
+        exitCode,
+        stdout: stdoutRaw,
+        stderr: stderrText,
+      });
+    }
+    if (agentResultError) {
+      throw new AgentCliExitError({
+        runner: "Claude Code",
+        exitCode: 1,
+        stdout: stdoutRaw,
+      });
+    }
+  }
+
+  private _isErrorResultLine(line: string): boolean {
+    try {
+      const obj = JSON.parse(line);
+      return obj?.type === "result" && obj?.is_error === true;
+    } catch {
+      return false;
     }
   }
 
@@ -234,17 +254,6 @@ export class ClaudeAgentRunner implements AgentRunner {
 
 function containsToolResult(message: { content: MessageContent[] }): boolean {
   return message.content.some((content) => content.type === "tool_result");
-}
-
-/**
- * Keep only the trailing `maxChars` of `text` (errors surface at the end),
- * prefixing a marker noting how much was dropped. Returns `text` unchanged
- * when it already fits.
- */
-function _clipTail(text: string, maxChars: number): string {
-  if (text.length <= maxChars) return text;
-  const dropped = text.length - maxChars;
-  return `… [${dropped} chars truncated]\n${text.slice(-maxChars)}`;
 }
 
 interface PermissionBridge {

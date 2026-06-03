@@ -22,6 +22,9 @@ if [ "$server_running" = true ] || [ "$web_running" = true ]; then
   echo "Agentara is already running:"
   [ "$server_running" = true ] && echo "  server PID: $(cat "$RUN_DIR/server.pid")"
   [ "$web_running" = true ]    && echo "  web    PID: $(cat "$RUN_DIR/web.pid")"
+  if [ "${AGENTARA_UP_IGNORE_RUNNING:-0}" = "1" ]; then
+    exit 0
+  fi
   echo "Run 'make down' to stop first."
   exit 1
 fi
@@ -31,9 +34,11 @@ rm -f "$RUN_DIR/server.pid" "$RUN_DIR/web.pid"
 
 echo "Starting Agentara in the background..."
 
-# Start backend server
+# Start backend server under the supervisor (auto-restart + Feishu crash alert).
+# The tracked PID is the supervisor's; it forwards SIGTERM to the child so
+# `make down` still tears down the whole tree.
 cd "$PROJECT_DIR"
-nohup bun run start:server > "$LOG_DIR/server.log" 2>&1 &
+nohup bun run start:supervised > "$LOG_DIR/server.log" 2>&1 &
 SERVER_PID=$!
 sleep 1
 if ! kill -0 "$SERVER_PID" 2>/dev/null; then
