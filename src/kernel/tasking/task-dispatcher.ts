@@ -504,6 +504,26 @@ export class TaskDispatcher {
     return row?.id;
   }
 
+  getActiveTaskStatusForSession(
+    sessionId: string,
+  ): "running" | "pending" | undefined {
+    const running = this._db
+      .select({ status: tasks.status })
+      .from(tasks)
+      .where(and(eq(tasks.session_id, sessionId), eq(tasks.status, "running")))
+      .get();
+    if (running) return "running";
+
+    const pending = this._db
+      .select({ status: tasks.status })
+      .from(tasks)
+      .where(and(eq(tasks.session_id, sessionId), eq(tasks.status, "pending")))
+      .get();
+    if (pending) return "pending";
+
+    return undefined;
+  }
+
   /**
    * Get a pending or running task by its inbound message ID.
    * @param messageId - The Feishu message ID to look up.

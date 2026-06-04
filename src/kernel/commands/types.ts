@@ -32,6 +32,14 @@ export interface CommandContext {
    * commands (e.g. `/topic`) to surface agent_type / runner_session_id.
    */
   sessionManager: SessionManager;
+  taskDispatcher: {
+    // eslint-disable-next-line no-unused-vars
+    getActiveTaskStatusForSession(sessionId: string): "running" | "pending" | undefined;
+  };
+  // eslint-disable-next-line no-unused-vars
+  readSessionUsageSnapshot(sessionId: string):
+    | { message_id: string; used_tokens: number; model?: string }
+    | undefined;
   logger: Logger;
 }
 

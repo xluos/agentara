@@ -553,6 +553,8 @@ class Kernel {
         workspaceStore: this._workspaceStore,
         feishuChannels: this._feishuChannels,
         sessionManager: this._sessionManager,
+        taskDispatcher: this._taskDispatcher,
+        readSessionUsageSnapshot: readLatestSessionUsageSnapshot,
         logger: this._logger,
       });
       if (typeof result === "string") {

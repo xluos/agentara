@@ -79,6 +79,23 @@ async function execGit(
   return { ok: code === 0, stdout: stdout.trim(), stderr: stderr.trim(), code };
 }
 
+function formatActiveTaskStatus(status: "running" | "pending" | undefined): string {
+  if (status === "running") return "`running`（执行中）";
+  if (status === "pending") return "`pending`（排队中）";
+  return "`idle`（空闲，无活跃任务）";
+}
+
+function formatTokens(n: number): string {
+  if (n >= 1_000_000) {
+    const m = n / 1_000_000;
+    return Number.isInteger(m) ? `${m}M` : `${m.toFixed(1)}M`;
+  }
+  if (n < 1000) return `${n}`;
+  const k = n / 1000;
+  if (k >= 100 || Number.isInteger(k)) return `${Math.round(k)}k`;
+  return `${k.toFixed(1)}k`;
+}
+
 function cardReply(
   title: string,
   lines: string[],
@@ -688,13 +705,27 @@ const topicHandler: CommandHandler = {
     const session = ctx.sessionManager.getSession(msg.session_id);
     if (session) {
       lines.push(`- Agent 类型：\`${session.agent_type}\``);
-      if (session.runner_session_id) {
-        lines.push(`- Runner Session ID：\`${session.runner_session_id}\``);
-      } else {
-        lines.push("- Runner Session ID：(尚未建立)");
+      if (session.agent_type === "codex") {
+        if (session.runner_session_id) {
+          lines.push(`- Codex 会话 ID：\`${session.runner_session_id}\``);
+        } else {
+          lines.push("- Codex 会话 ID：(尚未建立)");
+        }
       }
     } else {
       lines.push("- 数据库尚无该 session 记录（消息刚到，未持久化）。");
+    }
+    lines.push(
+      `- 当前任务状态：${formatActiveTaskStatus(ctx.taskDispatcher.getActiveTaskStatusForSession(msg.session_id))}`,
+    );
+
+    const usage = ctx.readSessionUsageSnapshot(msg.session_id);
+    if (usage) {
+      lines.push(
+        `- 当前 Token：\`${formatTokens(usage.used_tokens)}\`${usage.model ? `（${usage.model}）` : ""}`,
+      );
+    } else {
+      lines.push("- 当前 Token：(暂无统计)");
     }
 
     if (msg.thread_id && msg.channel_id) {
