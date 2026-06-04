@@ -854,6 +854,13 @@ class Kernel {
       forceNewRunnerSession: payload.forceNewRunnerSession,
       firstMessage: inboundMessage,
     });
+    await this._maybeAutoCompactIdleHighContextSession(
+      session,
+      inboundMessage,
+      existingSession,
+      signal,
+    );
+
     let contents: AssistantMessage["content"] = [
       {
         type: "thinking",
@@ -878,13 +885,6 @@ class Kernel {
     // usage/model and would otherwise blank out the footer.
     let lastUsageMessage: AssistantMessage | undefined;
     try {
-      await this._maybeAutoCompactIdleHighContextSession(
-        session,
-        inboundMessage,
-        outboundMessage,
-        existingSession,
-        signal,
-      );
       const stream = await session.stream(inboundMessage, { signal });
       for await (const message of stream) {
         if (message.role === "assistant") {
@@ -947,7 +947,6 @@ class Kernel {
   private async _maybeAutoCompactIdleHighContextSession(
     session: Awaited<ReturnType<SessionManager["resolveSession"]>>,
     inboundMessage: UserMessage,
-    outboundMessage: AssistantMessage,
     existingSession: SessionEntity | undefined,
     signal?: AbortSignal,
   ): Promise<void> {
@@ -977,12 +976,16 @@ class Kernel {
       "auto-compacting idle high-context session before user turn",
     );
 
-    await this._tryUpdateAutoCompactStatus(outboundMessage, [
-      {
-        type: "text",
-        text: "检测到当前会话上下文已超过 200k tokens，且超过 1 小时没有交互，正在先自动执行 /compact 压缩上下文…",
-      },
-    ]);
+    const statusCard = await this._tryCreateAutoCompactStatusCard(
+      inboundMessage,
+      session.id,
+      [
+        {
+          type: "text",
+          text: "检测到当前会话上下文已超过 200k tokens，且超过 1 小时没有交互，正在先自动执行 /compact 压缩上下文…",
+        },
+      ],
+    );
 
     try {
       await session.run(
@@ -993,7 +996,7 @@ class Kernel {
         },
         { signal },
       );
-      await this._tryUpdateAutoCompactStatus(outboundMessage, [
+      await this._tryUpdateAutoCompactStatus(statusCard, [
         {
           type: "text",
           text: "自动压缩已完成，继续处理你的消息…",
@@ -1009,17 +1012,52 @@ class Kernel {
         },
         "auto-compact before user turn failed; continuing with original message",
       );
+      await this._tryUpdateAutoCompactStatus(statusCard, [
+        {
+          type: "text",
+          text: "自动压缩未完成，已继续处理你的消息…",
+        },
+      ]);
+    }
+  }
+
+  private async _tryCreateAutoCompactStatusCard(
+    inboundMessage: UserMessage,
+    sessionId: string,
+    content: AssistantMessage["content"],
+  ): Promise<AssistantMessage | undefined> {
+    try {
+      return await this._messageGateway.replyMessage(
+        inboundMessage.id,
+        {
+          role: "assistant",
+          session_id: sessionId,
+          content,
+        },
+        { streaming: true },
+      );
+    } catch (err) {
+      this._logger.warn(
+        {
+          err,
+          inbound_message_id: inboundMessage.id,
+          session_id: sessionId,
+        },
+        "failed to create auto-compact status card",
+      );
+      return undefined;
     }
   }
 
   private async _tryUpdateAutoCompactStatus(
-    outboundMessage: AssistantMessage,
+    outboundMessage: AssistantMessage | undefined,
     content: AssistantMessage["content"],
   ): Promise<void> {
+    if (!outboundMessage) return;
     try {
       await this._messageGateway.updateMessageContent(
         { ...outboundMessage, content },
-        { streaming: true },
+        { streaming: false },
       );
     } catch (err) {
       this._logger.warn(
