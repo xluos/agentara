@@ -57,7 +57,12 @@ import {
 import { buildCommandCard } from "./commands/cards";
 import { GroupFlow } from "./group/group-flow";
 import { MultiChannelMessageGateway } from "./messaging";
-import { PERMISSION_ACTION, PermissionFlow, QUESTION_ACTION } from "./permission";
+import {
+  PERMISSION_ACTION,
+  PermissionFlow,
+  QUESTION_ACTION,
+  type QuestionStatusEvent,
+} from "./permission";
 import { ReposFlow } from "./repos";
 import { readLatestSessionUsageSnapshot, SessionManager } from "./sessioning";
 import * as sessioningSchema from "./sessioning/data";
@@ -92,6 +97,11 @@ class Kernel {
   private _reposFlow!: ReposFlow;
   private _groupFlow!: GroupFlow;
   private _permissionFlow!: PermissionFlow;
+  private _questionStatusUpdaters = new Map<
+    string,
+    // eslint-disable-next-line no-unused-vars
+    (event: QuestionStatusEvent) => void | Promise<void>
+  >();
   private _codexResumeRestarts = new Map<
     string,
     { sessionId: string; message: UserMessage }
@@ -265,6 +275,7 @@ class Kernel {
   private _initPermissionFlow(): void {
     this._permissionFlow = new PermissionFlow({
       feishuChannels: this._feishuChannels,
+      onQuestionStatus: (event) => this._handleQuestionStatus(event),
     });
   }
 
@@ -879,70 +890,123 @@ class Kernel {
       },
     );
     contents = [];
+    const unregisterQuestionStatusUpdater =
+      this._registerQuestionStatusUpdater(session.id, outboundMessage, () => contents);
     let lastMessage: AssistantMessage | undefined;
     // Footer stats come from the most recent turn that actually reported
     // usage — trailing synthetic messages (compaction notices) carry no
     // usage/model and would otherwise blank out the footer.
     let lastUsageMessage: AssistantMessage | undefined;
     try {
-      const stream = await session.stream(inboundMessage, { signal });
-      for await (const message of stream) {
-        if (message.role === "assistant") {
-          contents.push(...message.content);
+      try {
+        const stream = await session.stream(inboundMessage, { signal });
+        for await (const message of stream) {
+          if (message.role === "assistant") {
+            contents.push(...message.content);
+            await this._messageGateway.updateMessageContent(
+              { ...outboundMessage, content: contents },
+              {
+                streaming: true,
+              },
+            );
+            lastMessage = message;
+            if (message.usage) lastUsageMessage = message;
+          }
+        }
+        if (!lastMessage) {
+          throw new Error("No assistant message received from the agent.");
+        }
+        this._sessionManager.markSuccessfulInteraction(session.id);
+      } catch (err) {
+        if (err instanceof CodexMissingResumeError) {
+          await this._handleCodexMissingResume(
+            err,
+            inboundMessage,
+            session.id,
+            outboundMessage,
+          );
+          throw err;
+        }
+        const failureContent = signal?.aborted
+          ? buildAgentCancelledContent()
+          : buildAgentFailureContent(err, { sessionId: session.id });
+        try {
           await this._messageGateway.updateMessageContent(
-            { ...outboundMessage, content: contents },
+            { ...outboundMessage, content: failureContent },
             {
-              streaming: true,
+              streaming: false,
             },
           );
-          lastMessage = message;
-          if (message.usage) lastUsageMessage = message;
+        } catch (updateErr) {
+          this._logger.error(
+            {
+              err: updateErr,
+              session_id: session.id,
+              outbound_message_id: outboundMessage.id,
+            },
+            "failed to update assistant message after agent failure",
+          );
         }
-      }
-      if (!lastMessage) {
-        throw new Error("No assistant message received from the agent.");
-      }
-      this._sessionManager.markSuccessfulInteraction(session.id);
-    } catch (err) {
-      if (err instanceof CodexMissingResumeError) {
-        await this._handleCodexMissingResume(
-          err,
-          inboundMessage,
-          session.id,
-          outboundMessage,
-        );
         throw err;
       }
-      const failureContent = signal?.aborted
-        ? buildAgentCancelledContent()
-        : buildAgentFailureContent(err, { sessionId: session.id });
-      try {
-        await this._messageGateway.updateMessageContent(
-          { ...outboundMessage, content: failureContent },
+      await this._messageGateway.updateMessageContent(
+        { ...outboundMessage, content: contents },
+        {
+          streaming: false,
+          footer: await this._buildCardFooter(lastUsageMessage),
+        },
+      );
+    } finally {
+      unregisterQuestionStatusUpdater();
+    }
+  };
+
+  private _registerQuestionStatusUpdater(
+    sessionId: string,
+    outboundMessage: AssistantMessage,
+    getContents: () => AssistantMessage["content"],
+  ): () => void {
+    const updater = async (event: QuestionStatusEvent) => {
+      const contents = getContents();
+      const target = _findAskUserQuestionToolUse(contents, event.tool_use_id);
+      if (!target) {
+        this._logger.warn(
           {
-            streaming: false,
-          },
-        );
-      } catch (updateErr) {
-        this._logger.error(
-          {
-            err: updateErr,
-            session_id: session.id,
+            session_id: sessionId,
+            tool_use_id: event.tool_use_id,
             outbound_message_id: outboundMessage.id,
           },
-          "failed to update assistant message after agent failure",
+          "question status target tool_use not found",
         );
+        return;
       }
-      throw err;
+      target.input.__agentara_question_status = event.status;
+      await this._messageGateway.updateMessageContent(
+        { ...outboundMessage, content: contents },
+        { streaming: true },
+      );
+    };
+    this._questionStatusUpdaters.set(sessionId, updater);
+    return () => {
+      if (this._questionStatusUpdaters.get(sessionId) === updater) {
+        this._questionStatusUpdaters.delete(sessionId);
+      }
+    };
+  }
+
+  private async _handleQuestionStatus(
+    event: QuestionStatusEvent,
+  ): Promise<void> {
+    const updater = this._questionStatusUpdaters.get(event.session_id);
+    if (!updater) {
+      this._logger.warn(
+        { session_id: event.session_id, tool_use_id: event.tool_use_id },
+        "question status has no active streaming updater",
+      );
+      return;
     }
-    await this._messageGateway.updateMessageContent(
-      { ...outboundMessage, content: contents },
-      {
-        streaming: false,
-        footer: await this._buildCardFooter(lastUsageMessage),
-      },
-    );
-  };
+    await updater(event);
+  }
 
   private async _maybeAutoCompactIdleHighContextSession(
     session: Awaited<ReturnType<SessionManager["resolveSession"]>>,
@@ -1242,6 +1306,25 @@ ${payload.instruction}`,
     this._sessionManager.markSuccessfulInteraction(session.id);
     await this._messageGateway.postMessage(assistantMessage);
   };
+}
+
+function _findAskUserQuestionToolUse(
+  contents: AssistantMessage["content"],
+  toolUseId?: string,
+): Extract<AssistantMessage["content"][number], { type: "tool_use" }> | undefined {
+  const matches = contents.filter(
+    (
+      content,
+    ): content is Extract<
+      AssistantMessage["content"][number],
+      { type: "tool_use" }
+    > => content.type === "tool_use" && content.name === "AskUserQuestion",
+  );
+  if (toolUseId) {
+    const byId = matches.find((content) => content.id === toolUseId);
+    if (byId) return byId;
+  }
+  return matches.at(-1);
 }
 
 export const kernel = new Kernel();

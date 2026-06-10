@@ -115,6 +115,8 @@ async function _handleToolsCall(
     chat_id: _env("AGENTARA_CHAT_ID"),
     initiator_open_id: _env("AGENTARA_INITIATOR_OPEN_ID"),
     reply_to_message_id: _env("AGENTARA_REPLY_TO_MESSAGE_ID", false) || undefined,
+    tool_use_id:
+      typeof args.tool_use_id === "string" ? args.tool_use_id : undefined,
     tool_name: toolName,
     tool_input: toolInput,
   };

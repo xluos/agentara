@@ -39,6 +39,7 @@ export interface PermissionDecision {
  */
 export interface PermissionRequestParams {
   session_id: string;
+  tool_use_id?: string;
   tool_name: string;
   tool_input: Record<string, unknown>;
   channel_id: string;
@@ -78,11 +79,18 @@ interface PendingQuestionEntry {
   channel_id: string;
   chat_id: string;
   card_message_id: string;
+  tool_use_id?: string;
   questions: AskUserQuestionItem[];
   created_at: number;
   // eslint-disable-next-line no-unused-vars
   resolve: (decision: PermissionDecision) => void;
   timeout: ReturnType<typeof setTimeout>;
+}
+
+export interface QuestionStatusEvent {
+  session_id: string;
+  tool_use_id?: string;
+  status: "waiting" | "answered" | "timeout" | "expired";
 }
 
 /**
@@ -105,6 +113,10 @@ interface PendingQuestionEntry {
 export class PermissionFlow {
   private readonly _logger: Logger = createLogger("permission-flow");
   private readonly _feishuChannels: Map<string, FeishuMessageChannel>;
+  private readonly _onQuestionStatus?: (
+    // eslint-disable-next-line no-unused-vars
+    event: QuestionStatusEvent,
+  ) => void | Promise<void>;
   private readonly _pending = new Map<string, PendingEntry>();
   private readonly _pendingQuestions = new Map<string, PendingQuestionEntry>();
   private readonly _timeoutMs: number;
@@ -127,9 +139,14 @@ export class PermissionFlow {
   constructor(deps: {
     feishuChannels: Map<string, FeishuMessageChannel>;
     timeoutMs?: number;
+    onQuestionStatus?: (
+      // eslint-disable-next-line no-unused-vars
+      event: QuestionStatusEvent,
+    ) => void | Promise<void>;
   }) {
     this._feishuChannels = deps.feishuChannels;
     this._timeoutMs = deps.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    this._onQuestionStatus = deps.onQuestionStatus;
   }
 
   /**
@@ -402,6 +419,11 @@ export class PermissionFlow {
           buildQuestionResultCard({ outcome: "timeout" }),
           "question-timeout",
         );
+        void this._emitQuestionStatus({
+          session_id: params.session_id,
+          tool_use_id: params.tool_use_id,
+          status: "timeout",
+        });
         resolve({
           behavior: "deny",
           message: `Question timed out after ${DEFAULT_TIMEOUT_MINUTES} minutes with no answer.`,
@@ -412,6 +434,7 @@ export class PermissionFlow {
       this._pendingQuestions.set(cardMessageId, {
         request_id: requestId,
         session_id: params.session_id,
+        tool_use_id: params.tool_use_id,
         initiator_open_id: params.initiator_open_id,
         channel_id: params.channel_id,
         chat_id: params.chat_id,
@@ -430,6 +453,11 @@ export class PermissionFlow {
         },
         "question card sent",
       );
+      void this._emitQuestionStatus({
+        session_id: params.session_id,
+        tool_use_id: params.tool_use_id,
+        status: "waiting",
+      });
     });
   }
 
@@ -527,6 +555,11 @@ export class PermissionFlow {
       buildQuestionResultCard({ outcome: "answered", detail }),
       "question-answered",
     );
+    await this._emitQuestionStatus({
+      session_id: entry.session_id,
+      tool_use_id: entry.tool_use_id,
+      status: "answered",
+    });
     this._logger.info(
       { request_id: entry.request_id, session_id: entry.session_id },
       "question answered",
@@ -576,6 +609,11 @@ export class PermissionFlow {
         buildQuestionResultCard({ outcome: "expired" }),
         "shutdown-expire",
       );
+      void this._emitQuestionStatus({
+        session_id: entry.session_id,
+        tool_use_id: entry.tool_use_id,
+        status: "expired",
+      });
       entry.resolve({
         behavior: "deny",
         message: "Kernel is shutting down; question expired.",
@@ -636,6 +674,18 @@ export class PermissionFlow {
       this._logger.error(
         { err, stage, message_id: messageId },
         "permission updateRawCard failed",
+      );
+    }
+  }
+
+  private async _emitQuestionStatus(event: QuestionStatusEvent): Promise<void> {
+    if (!this._onQuestionStatus) return;
+    try {
+      await this._onQuestionStatus(event);
+    } catch (err) {
+      this._logger.warn(
+        { err, session_id: event.session_id, tool_use_id: event.tool_use_id },
+        "question status callback failed",
       );
     }
   }

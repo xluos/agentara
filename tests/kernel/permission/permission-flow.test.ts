@@ -240,11 +240,16 @@ describe("PermissionFlow", () => {
 
   test("AskUserQuestion resolves 'allow' with answers on submit", async () => {
     const { fake, channel } = _makeChannel("card_q_1");
+    const statuses: Array<{ status: string; tool_use_id?: string }> = [];
     const flow = new PermissionFlow({
       feishuChannels: new Map([["ch_1", channel]]),
+      onQuestionStatus: (event) => {
+        statuses.push(event);
+      },
     });
     const promise = flow.request({
       session_id: "sq",
+      tool_use_id: "toolu_question_1",
       channel_id: "ch_1",
       chat_id: "oc_chat",
       initiator_open_id: "ou_alice",
@@ -274,6 +279,14 @@ describe("PermissionFlow", () => {
     });
     await Promise.resolve();
     expect(fake.sentCards.length).toBe(1);
+    expect(statuses).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          status: "waiting",
+          tool_use_id: "toolu_question_1",
+        }),
+      ]),
+    );
 
     await flow.handleQuestionSubmit(
       _makePayload({
@@ -288,6 +301,14 @@ describe("PermissionFlow", () => {
     const decision = await promise;
     expect(decision.behavior).toBe("allow");
     expect(decision.decided_by).toBe("user");
+    expect(statuses).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          status: "answered",
+          tool_use_id: "toolu_question_1",
+        }),
+      ]),
+    );
     const input = decision.updated_input as {
       questions: unknown[];
       answers: Record<string, unknown>;

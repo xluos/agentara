@@ -466,6 +466,16 @@ function _renderTool(
         ),
       );
       break;
+    case "AskUserQuestion":
+      stepPanel.elements.push(
+        _renderStep(
+          `Ask user question${_questionToolStatusText(
+            content.input.__agentara_question_status,
+          )}`,
+          "setting-inter_outlined",
+        ),
+      );
+      break;
     case "ToolSearch":
       // Ignore ToolSearch for now
       //
@@ -481,6 +491,21 @@ function _renderTool(
       stepPanel.elements.push(
         _renderStep(content.name, "setting-inter_outlined"),
       );
+  }
+}
+
+function _questionToolStatusText(status: unknown): string {
+  switch (status) {
+    case "waiting":
+      return " · 等待回答";
+    case "answered":
+      return " · 已收到回答，继续处理";
+    case "timeout":
+      return " · 等待超时";
+    case "expired":
+      return " · 已失效";
+    default:
+      return "";
   }
 }
 

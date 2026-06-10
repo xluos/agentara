@@ -19,6 +19,7 @@ const PermissionRequestBody = z.object({
   chat_id: z.string(),
   initiator_open_id: z.string(),
   reply_to_message_id: z.string().optional(),
+  tool_use_id: z.string().optional(),
   tool_name: z.string(),
   tool_input: z.record(z.string(), z.unknown()),
 });
@@ -46,6 +47,7 @@ export const permissionRoutes = new Hono().post(
       chat_id: body.chat_id,
       initiator_open_id: body.initiator_open_id,
       reply_to_message_id: body.reply_to_message_id,
+      tool_use_id: body.tool_use_id,
       tool_name: body.tool_name,
       tool_input: body.tool_input,
     });
