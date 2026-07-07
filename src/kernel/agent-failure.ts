@@ -69,10 +69,18 @@ function describeAgentFailure(err: unknown): FailureDisplay {
     };
   }
 
-  if (/country=CN|出口 IP 不在美国|proxy|Clash TUN|HTTP 代理/i.test(raw)) {
+  if (/Not logged in|Please run \/login|authentication_failed/i.test(raw)) {
+    return {
+      summary: "底层 Agent 登录态失效，当前请求没有真正开始执行。",
+      details: [_firstNonEmptyLine(raw, ["Not logged in", "Please run /login", "authentication_failed"])],
+      suggestion: "在对应底层 CLI 里重新登录后重试；如果是 Claude Code runner，先执行 `claude auth status` 确认，再用 `claude auth login --claudeai` 或交互界面的 `/login` 重新登录。",
+    };
+  }
+
+  if (/country=CN|出口 IP 不在美国|Clash TUN|HTTP 代理|proxy gate|proxy.+failed|failed.+proxy/i.test(raw)) {
     return {
       summary: "代理或出口环境检查失败。",
-      details: [_firstNonEmptyLine(raw, ["country=", "Clash", "proxy", "代理"])],
+      details: [_firstNonEmptyLine(raw, ["country=", "Clash", "proxy gate", "proxy", "代理"])],
       suggestion: "检查 Clash/TUN/HTTP_PROXY/HTTPS_PROXY 后重试，或临时切换到不带代理 gate 的 Agent。",
     };
   }

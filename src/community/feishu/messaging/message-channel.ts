@@ -1224,11 +1224,17 @@ export class FeishuMessageChannel
     // thread into "auto-respond" mode via `/unmute`, which is what this flag
     // reflects. `/mute` restores the default.
     const isThreadAutoRespond = this._isThreadAutoRespond(threadId);
+    // Feishu does not allow @-mentioning a bot in file/image upload messages,
+    // so exempt these types from the mention gate. The sender whitelist still
+    // applies as the security boundary.
+    const isMediaMessage =
+      messageType === "file" || messageType === "image";
     const mentionEnforced =
       this._requireMention &&
       chatType === "group" &&
       !isSlashCommand &&
-      !isThreadAutoRespond;
+      !isThreadAutoRespond &&
+      !isMediaMessage;
     const isBotMentioned =
       !!this._botOpenId &&
       !!mentions?.some((m) => m.id?.open_id === this._botOpenId);
@@ -1257,6 +1263,7 @@ export class FeishuMessageChannel
     const isIntendedForBot =
       isSlashCommand ||
       isBotMentioned ||
+      isMediaMessage ||
       isThreadAutoRespond ||
       chatType === "p2p";
 

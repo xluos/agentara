@@ -86,4 +86,26 @@ describe("buildAgentFailureContent", () => {
       rmSync(home, { recursive: true, force: true });
     }
   });
+
+  test("prioritizes CLI auth failures over proxy words in injected context", () => {
+    const stdout = [
+      '{"type":"system","subtype":"hook_response","output":"dev-memory mentions proxy and Clash in unrelated context"}',
+      '{"type":"assistant","message":{"content":[{"type":"text","text":"Not logged in · Please run /login"}]},"error":"authentication_failed"}',
+      '{"type":"result","is_error":true,"result":"Not logged in · Please run /login"}',
+    ].join("\n");
+
+    const content = buildAgentFailureContent(
+      new AgentCliExitError({
+        runner: "Claude Code",
+        exitCode: 1,
+        stdout,
+      }),
+    );
+
+    const first = content[0]!;
+    if (first.type !== "text") throw new Error("expected text content");
+    expect(first.text).toContain("登录态失效");
+    expect(first.text).toContain("/login");
+    expect(first.text).not.toContain("代理或出口环境检查失败");
+  });
 });
