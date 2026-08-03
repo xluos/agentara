@@ -17,7 +17,7 @@ import {
   syncWorkspace,
   type RepoSyncResult,
 } from "@/kernel/workspaces";
-import { loadPredefinedRepos } from "@/shared";
+import { config, loadPredefinedRepos, type MessagingConfig } from "@/shared";
 
 import type { Card, Element } from "../../community/feishu/messaging/types";
 import { buildMarkdown } from "../setup/card-ui";
@@ -60,6 +60,49 @@ function requireGroupChat(ctx: CommandContext): string | null {
   if (!chatId) return null;
   if (ctx.message.chat_type === "single") return null;
   return chatId;
+}
+
+/**
+ * Resolve the Feishu chat configured by messaging.default_channel_id.
+ * The channel id identifies the configured channel; its params.chat_id is
+ * the actual default group chat id.
+ */
+export function getDefaultGroupChatId(
+  messaging: MessagingConfig,
+): string | undefined {
+  const defaultChannel = messaging.channels.find(
+    (channel) => channel.id === messaging.default_channel_id,
+  );
+  if (!defaultChannel || defaultChannel.type !== "feishu") return undefined;
+  return defaultChannel.params.chat_id || undefined;
+}
+
+/**
+ * Resolve where /clone should write.
+ *
+ * Single chats and the configured default group always use Default. Other
+ * groups must already have a workspace binding; null means the caller should
+ * ask the group to bind before cloning.
+ */
+export function resolveCloneWorkspacePath(options: {
+  chatType?: "group" | "single";
+  chatId?: string;
+  defaultGroupChatId?: string;
+  defaultWorkspacePath: string;
+  bindingWorkspacePath?: string;
+}): string | null {
+  const isSingleChat = options.chatType === "single";
+  const isDefaultGroup =
+    options.chatType === "group" &&
+    options.chatId !== undefined &&
+    options.chatId === options.defaultGroupChatId;
+  const isDefaultWorkspaceBinding =
+    options.bindingWorkspacePath === options.defaultWorkspacePath;
+
+  if (isSingleChat || isDefaultGroup || isDefaultWorkspaceBinding) {
+    return options.defaultWorkspacePath;
+  }
+  return options.bindingWorkspacePath ?? null;
 }
 
 async function execGit(
@@ -400,22 +443,24 @@ const lsHandler: CommandHandler = {
 
 const cloneHandler: CommandHandler = {
   name: "clone",
-  description: "/clone <git-url> [别名] — 将仓库克隆到当前群的 workspace",
+  description: "/clone <git-url> [别名] — 克隆到 Default 或当前已绑定 workspace",
   async execute(ctx) {
-    const chatId = requireGroupChat(ctx);
+    const chatId = requireChatId(ctx);
     if (!chatId) {
-      if (ctx.message.chat_type === "single") {
-        return "❌ /clone 仅在飞书群内可用；单聊请先 `/switch` 到目标 workspace，在群里执行克隆。";
-      }
-      return "❌ /clone 仅在飞书群内可用。";
+      return "❌ /clone 需要飞书会话上下文。";
     }
     const [url, explicitName] = ctx.args;
     if (!url) return "用法：`/clone <git-url> [别名]`";
     const resolution = ctx.workspaceStore.resolve(chatId);
-    const workspacePath = resolution.binding?.workspace_path ?? resolution.cwd;
-    // Ensure binding row exists so workspace_path is persisted even before active_repo is picked
-    if (!resolution.binding) {
-      ctx.workspaceStore.upsertBinding(chatId, {});
+    const workspacePath = resolveCloneWorkspacePath({
+      chatType: ctx.message.chat_type,
+      chatId,
+      defaultGroupChatId: getDefaultGroupChatId(config.messaging),
+      defaultWorkspacePath: config.paths.default_workspace,
+      bindingWorkspacePath: resolution.binding?.workspace_path,
+    });
+    if (!workspacePath) {
+      return "❌ 当前群尚未绑定 workspace，请先执行 `/bind` 或 `/setup`，再使用 `/clone`。";
     }
     const name = explicitName || deriveRepoName(url);
     const targetPath = join(workspacePath, name);

@@ -80,7 +80,7 @@ Parsed in `Kernel._handleInboundMessage` (`src/kernel/kernel.ts:114`) before `Ta
 | `/bind <repo> <branch>` | group | Upsert `group_workspaces` row, set `active_repo` + `active_branch`. Rejects if `<repo>` not in workspace (suggests `/clone`). |
 | `/unbind` | group | Delete `group_workspaces` row. |
 | `/status` | group + topic | Show group binding, list cloned repos, show current topic's `session_id`. |
-| `/clone <git-url> [name]` | group | `git clone` into `workspace_path`. Rejects on name collision. |
+| `/clone <git-url> [name]` | single + group | Single chats and the configured default group clone into `_default`; a bound non-default group clones into its bound workspace; an unbound non-default group is asked to bind first. Rejects on name collision. |
 | `/checkout <branch>` | group | `git checkout` in active repo; updates `active_branch`. Rejects on dirty tree. |
 | `/ls` | group | List directories under `workspace_path`. |
 | `/new` | topic | Archive current session for this topic; next message opens a new session with the same `session_id` reset (or appends a generation suffix). |
@@ -161,7 +161,7 @@ Strict; no silent coercion.
 - `/clone` with name collision → reject.
 - `/checkout` on dirty tree → reply with `git status --short` output; require user to resolve manually.
 - `/unbind` when no row → reply "group is not bound".
-- Inbound message from group with no binding → silently fall back to `_default`, no error.
+- Inbound message from group with no binding → normal agent turns silently fall back to `_default`, no error; mutating `/clone` is rejected and asks the group to bind first.
 - Feishu event missing `chat_id` → log error, drop event.
 - Gateway command execution failure → reply with error text; do not dispatch LLM fallback.
 
